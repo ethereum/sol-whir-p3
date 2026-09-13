@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import { KoalaBearPackedField } from "../../field/KoalaBearPackedField.sol";
 
 import { KoalaBear } from "../../field/KoalaBear.sol";
 import { KoalaBearExt5 } from "../../field/KoalaBearExt5.sol";
@@ -11,6 +12,15 @@ import { WhirVerifierUtils5 } from "./WhirVerifierUtils5.sol";
 
 library WhirVerifierCore5 {
     using KeccakChallenger for KeccakChallenger.State;
+
+    bytes private constant POW_TABLE_ROUND0 =
+        hex"00000001205d63c3484ef19b7c72a143514ddcad4ec6c539534ef3a93787f990143ef8990986b2321e3f974a2e1e79003440651f421a291e4fe17621510d61d1000000016c4a8a45163bd49958ff6e906e2f4d7a65d3aa2e57421f5d71352c4c45a60e616428b7e3665070516566002c4cd7bb26247e1bfa75386aad37c43dd9000000013e687d4d303964b2300ba3ce768fc6fa2cb3f80a3f56e3af3446e3ab7744959c3b725f621e9330746107e94c437ce0a445b5bd2e7e77ea690409289300000001334d48c727ad539b54d7833617668b8a540363e73546ad0e0b4d176329b75a801da1678948d2e0073f9e4a46654a8bad7d598a0369af7ef41ed33131000000015c4a5b990a28f03164a0e08708dbd69c4154af7e5af0e6ec6931c06d6832fe4a4489a82a226210df1d14ebfe27ae21e2309bb4e5433bb7737348d2db000000017e0100027f00000000feffff000000017e0100027f00000000feffff000000017e0100027f00000000feffff000000017e0100027f00000000feffff";
+    bytes private constant POW_TABLE_ROUND1 =
+        hex"00000001143ef8996c4a8a452af20850163bd4994e38e75058ff6e90197482136e2f4d7a5f4ec37265d3aa2e4c45a35957421f5d1283c20671352c4c010d00af0000000145a60e613e687d4d4625f2a2303964b27e3a7e88300ba3ce5f9907a9768fc6fa3172b4f92cb3f80a6bb97d963f56e3af6b1d5bd03446e3ab11863e84000000017744959c334d48c775227a3327ad539b32313d6e54d78336425d36ed17668b8a466286e4540363e713ac5cf73546ad0e377a49320b4d17634145eb850000000129b75a805c4a5b99586ff04e0a28f0315599fb2c64a0e08700d2f0dd08dbd69c41f938d84154af7e36a66a455af0e6ec717740f96931c06d0fe3cde7000000016832fe4a7e010002174e36507f00000016cd01b700feffff67b1c9b1000000016832fe4a7e010002174e36507f00000016cd01b700feffff67b1c9b1";
+    bytes private constant POW_TABLE_ROUND2 =
+        hex"000000016c4a8a45163bd49958ff6e906e2f4d7a65d3aa2e57421f5d71352c4c45a60e616428b7e3665070516566002c4cd7bb26247e1bfa75386aad37c43dd9000000013e687d4d303964b2300ba3ce768fc6fa2cb3f80a3f56e3af3446e3ab7744959c3b725f621e9330746107e94c437ce0a445b5bd2e7e77ea690409289300000001334d48c727ad539b54d7833617668b8a540363e73546ad0e0b4d176329b75a801da1678948d2e0073f9e4a46654a8bad7d598a0369af7ef41ed33131000000015c4a5b990a28f03164a0e08708dbd69c4154af7e5af0e6ec6931c06d6832fe4a4489a82a226210df1d14ebfe27ae21e2309bb4e5433bb7737348d2db000000017e0100027f00000000feffff000000017e0100027f00000000feffff000000017e0100027f00000000feffff000000017e0100027f00000000feffff";
+    bytes private constant POW_TABLE_FINAL =
+        hex"00000001163bd4996e2f4d7a57421f5d45a60e61665070514cd7bb2675386aad3e687d4d1908abb42a79b9947e1ad39c4625f2a217aa4b5f2cf219ca03bc565600000001303964b2768fc6fa3f56e3af7744959c1e933074437ce0a47e77ea69334d48c740fe646a100753d77ca12bf875227a3325957b534451b86f52a36f8f0000000127ad539b17668b8a3546ad0e29b75a8048d2e007654a8bad69af7ef45c4a5b995b47c55d3cc6248a171639a5586ff04e04c4aab70a9a56263bbe793a000000010a28f03108dbd69c5af0e6ec6832fe4a226210df27ae21e2433bb7737e0100026d6e568d3a89a0253893800a174e365063861a5027dfce221335b668000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000";
 
     struct EqStatement {
         uint256 numVariables;
@@ -131,61 +141,54 @@ library WhirVerifierCore5 {
     }
 
     function _fillSelVarsPow(uint256[] memory selVars, uint256 base, uint256 count) private pure {
-        unchecked {
-            uint256 i;
-            for (; i + 10 <= count; i += 10) {
-                uint256 e0;
-                uint256 e1;
-                uint256 e2;
-                uint256 e3;
-                uint256 e4;
-                uint256 e5;
-                uint256 e6;
-                uint256 e7;
-                uint256 e8;
-                uint256 e9;
-                assembly ("memory-safe") {
-                    let ptr := add(add(selVars, 0x20), shl(5, i))
-                    e0 := mload(ptr)
-                    e1 := mload(add(ptr, 0x20))
-                    e2 := mload(add(ptr, 0x40))
-                    e3 := mload(add(ptr, 0x60))
-                    e4 := mload(add(ptr, 0x80))
-                    e5 := mload(add(ptr, 0xa0))
-                    e6 := mload(add(ptr, 0xc0))
-                    e7 := mload(add(ptr, 0xe0))
-                    e8 := mload(add(ptr, 0x100))
-                    e9 := mload(add(ptr, 0x120))
-                }
-                (
-                    uint256 p0,
-                    uint256 p1,
-                    uint256 p2,
-                    uint256 p3,
-                    uint256 p4,
-                    uint256 p5,
-                    uint256 p6,
-                    uint256 p7,
-                    uint256 p8,
-                    uint256 p9
-                ) = _powBatch10(base, e0, e1, e2, e3, e4, e5, e6, e7, e8, e9);
-                assembly ("memory-safe") {
-                    let ptr := add(add(selVars, 0x20), shl(5, i))
-                    mstore(ptr, p0)
-                    mstore(add(ptr, 0x20), p1)
-                    mstore(add(ptr, 0x40), p2)
-                    mstore(add(ptr, 0x60), p3)
-                    mstore(add(ptr, 0x80), p4)
-                    mstore(add(ptr, 0xa0), p5)
-                    mstore(add(ptr, 0xc0), p6)
-                    mstore(add(ptr, 0xe0), p7)
-                    mstore(add(ptr, 0x100), p8)
-                    mstore(add(ptr, 0x120), p9)
+        uint256 freePtr;
+        assembly ("memory-safe") {
+            freePtr := mload(0x40)
+        }
+
+        // STIR indices are sampled below each folded-domain size, so the fixed bases below receive
+        // exponents of at most 22, 19, 18, and 17 bits. A regenerated schedule must update both the
+        // generator dispatch and its matching table; an unknown generator uses the general path.
+        bytes memory table;
+        if (base == 542_991_299) {
+            table = POW_TABLE_ROUND0;
+        } else if (base == 339_671_193) {
+            table = POW_TABLE_ROUND1;
+        } else if (base == 1_816_824_389) {
+            table = POW_TABLE_ROUND2;
+        } else if (base == 373_019_801) {
+            table = POW_TABLE_FINAL;
+        } else {
+            unchecked {
+                for (uint256 i = 0; i < count; ++i) {
+                    selVars[i] = KoalaBear.pow(base, selVars[i]);
                 }
             }
-            for (; i < count; ++i) {
-                selVars[i] = KoalaBear.pow(base, selVars[i]);
+            return;
+        }
+
+        assembly ("memory-safe") {
+            let modulus := 0x7f000001
+            let tableStart := add(table, 0x20)
+            let tableEnd := add(tableStart, mload(table))
+            let values := add(selVars, 0x20)
+            let valuesEnd := add(values, shl(5, count))
+            for { let valuePtr := values } lt(valuePtr, valuesEnd) {
+                valuePtr := add(valuePtr, 0x20)
+            } {
+                let exponent := mload(valuePtr)
+                let result := 1
+                for { let windowPtr := tableStart } lt(windowPtr, tableEnd) {
+                    windowPtr := add(windowPtr, 0x40)
+                } {
+                    let digit := and(exponent, 0x0f)
+                    let power := shr(224, mload(add(windowPtr, shl(2, digit))))
+                    result := mulmod(result, power, modulus)
+                    exponent := shr(4, exponent)
+                }
+                mstore(valuePtr, result)
             }
+            mstore(0x40, freePtr)
         }
     }
 
@@ -420,67 +423,53 @@ library WhirVerifierCore5 {
 
         unchecked {
             if (finalPolyLength == 64 && numQueries == 14) {
-                uint256 idx0;
-                uint256 idx1;
-                uint256 idx2;
-                uint256 idx3;
-                uint256 idx4;
-                uint256 idx5;
-                uint256 idx6;
-                uint256 idx7;
-                uint256 idx8;
-                uint256 idx9;
+                uint256 packedFinalPtr =
+                    WhirVerifierUtils5._prepareHornerRadix64(blob, finalPolyOffset);
+                _fillSelVarsPow(indices, foldedDomainGen, numQueries);
+                uint256 point0;
+                uint256 point1;
+                uint256 point2;
+                uint256 point3;
+                uint256 point4;
+                uint256 point5;
+                uint256 point6;
+                uint256 point7;
+                uint256 point8;
+                uint256 point9;
                 assembly ("memory-safe") {
                     let indicesBase := add(indices, 0x20)
-                    idx0 := mload(indicesBase)
-                    idx1 := mload(add(indicesBase, 0x20))
-                    idx2 := mload(add(indicesBase, 0x40))
-                    idx3 := mload(add(indicesBase, 0x60))
-                    idx4 := mload(add(indicesBase, 0x80))
-                    idx5 := mload(add(indicesBase, 0xa0))
-                    idx6 := mload(add(indicesBase, 0xc0))
-                    idx7 := mload(add(indicesBase, 0xe0))
-                    idx8 := mload(add(indicesBase, 0x100))
-                    idx9 := mload(add(indicesBase, 0x120))
+                    point0 := mload(indicesBase)
+                    point1 := mload(add(indicesBase, 0x20))
+                    point2 := mload(add(indicesBase, 0x40))
+                    point3 := mload(add(indicesBase, 0x60))
+                    point4 := mload(add(indicesBase, 0x80))
+                    point5 := mload(add(indicesBase, 0xa0))
+                    point6 := mload(add(indicesBase, 0xc0))
+                    point7 := mload(add(indicesBase, 0xe0))
+                    point8 := mload(add(indicesBase, 0x100))
+                    point9 := mload(add(indicesBase, 0x120))
                 }
-                (
-                    uint256 point0,
-                    uint256 point1,
-                    uint256 point2,
-                    uint256 point3,
-                    uint256 point4,
-                    uint256 point5,
-                    uint256 point6,
-                    uint256 point7,
-                    uint256 point8,
-                    uint256 point9
-                ) = _powBatch10(
-                    foldedDomainGen, idx0, idx1, idx2, idx3, idx4, idx5, idx6, idx7, idx8, idx9
-                );
 
                 uint256 rowEvalsBase;
                 assembly ("memory-safe") {
                     rowEvalsBase := add(rowEvals, 0x20)
                 }
-                uint256 mismatchPlusOne = WhirVerifierUtils5.checkHornerBaseBlob64Matches5Raw(
-                    blob, finalPolyOffset, point0, point1, point2, point3, point4, rowEvalsBase, 0
+                uint256 mismatchPlusOne = WhirVerifierUtils5._checkHornerRadix64(
+                    packedFinalPtr, point0, point1, point2, point3, point4, rowEvalsBase, 0
                 );
                 if (mismatchPlusOne != 0) {
                     revert StirConstraintFailed(mismatchPlusOne - 1);
                 }
-                mismatchPlusOne = WhirVerifierUtils5.checkHornerBaseBlob64Matches5Raw(
-                    blob, finalPolyOffset, point5, point6, point7, point8, point9, rowEvalsBase, 5
+                mismatchPlusOne = WhirVerifierUtils5._checkHornerRadix64(
+                    packedFinalPtr, point5, point6, point7, point8, point9, rowEvalsBase, 5
                 );
                 if (mismatchPlusOne != 0) {
                     revert StirConstraintFailed(mismatchPlusOne + 4);
                 }
 
                 for (uint256 i = 10; i < 14; ++i) {
-                    uint256 point = KoalaBear.pow(foldedDomainGen, indices[i]);
-                    if (
-                        WhirVerifierUtils5.hornerBaseBlob64Pairwise(blob, finalPolyOffset, point)
-                            != rowEvals[i]
-                    ) {
+                    uint256 point = indices[i];
+                    if (WhirVerifierUtils5._hornerRadix64(packedFinalPtr, point) != rowEvals[i]) {
                         revert StirConstraintFailed(i);
                     }
                 }
@@ -559,7 +548,9 @@ library WhirVerifierCore5 {
             }
 
             if (expectedKind == 0) {
-                uint256 eqWeightsPtr = WhirVerifierUtils5._computeDim4EqWeights(p0, p1, p2, p3);
+                uint256 eqWeightsPtr = WhirVerifierUtils5._prepareBaseRadix80(
+                    WhirVerifierUtils5._computeDim4EqWeights(p0, p1, p2, p3)
+                );
                 rowOffset = valuesOffset + numQueries * 64;
                 uint256 nextHigher;
                 for (uint256 i = numQueries; i > 0; --i) {
@@ -1398,23 +1389,40 @@ library WhirVerifierCore5 {
             uint256 round2Eq
         )
     {
-        statementEq = KoalaBearExt5.ONE;
-        initialEq = KoalaBearExt5.ONE;
-        round0Eq = KoalaBearExt5.ONE;
-        round1Eq = KoalaBearExt5.ONE;
-        round2Eq = KoalaBearExt5.ONE;
-
         uint256 initialCurrent = initialOodPoint;
         uint256 round0Current = round0OodPoint;
         uint256 round1Current = round1OodPoint;
         uint256 round2Current = round2OodPoint;
         uint256 pointBase;
+        uint256[10] memory state;
+        uint256[4] memory cache;
         assembly ("memory-safe") {
             pointBase := add(fullPoint, 0x20)
         }
 
         unchecked {
-            for (uint256 i = 22; i > 0; --i) {
+            {
+                uint256 q;
+                uint256 statementPointValue;
+                assembly ("memory-safe") {
+                    q := mload(add(pointBase, 672))
+                    statementPointValue := and(
+                        calldataload(add(add(blob.offset, statementPointOffset), 420)),
+                        not(sub(shl(96, 1), 1))
+                    )
+                }
+                _prepareEqTermForms(q, cache);
+                _initialEqAt(_eqAccumulatorPtr(state, 0), statementPointValue, cache);
+                _initialEqAt(_eqAccumulatorPtr(state, 1), initialCurrent, cache);
+                _initialEqAt(_eqAccumulatorPtr(state, 2), round0Current, cache);
+                _initialEqAt(_eqAccumulatorPtr(state, 3), round1Current, cache);
+                _initialEqAt(_eqAccumulatorPtr(state, 4), round2Current, cache);
+                initialCurrent = KoalaBearExt5.square(initialCurrent);
+                round0Current = KoalaBearExt5.square(round0Current);
+                round1Current = KoalaBearExt5.square(round1Current);
+                round2Current = KoalaBearExt5.square(round2Current);
+            }
+            for (uint256 i = 21; i > 0; --i) {
                 uint256 q;
                 uint256 statementPointValue;
                 assembly ("memory-safe") {
@@ -1426,24 +1434,30 @@ library WhirVerifierCore5 {
                     )
                 }
 
-                statementEq = KoalaBearExt5.mul(statementEq, _eqTerm(statementPointValue, q));
-                initialEq = KoalaBearExt5.mul(initialEq, _eqTerm(initialCurrent, q));
+                _prepareEqTermForms(q, cache);
+                _accEqAt(_eqAccumulatorPtr(state, 0), statementPointValue, cache);
+                _accEqAt(_eqAccumulatorPtr(state, 1), initialCurrent, cache);
                 initialCurrent = KoalaBearExt5.square(initialCurrent);
 
                 if (i > 4) {
-                    round0Eq = KoalaBearExt5.mul(round0Eq, _eqTerm(round0Current, q));
+                    _accEqAt(_eqAccumulatorPtr(state, 2), round0Current, cache);
                     round0Current = KoalaBearExt5.square(round0Current);
                     if (i > 8) {
-                        round1Eq = KoalaBearExt5.mul(round1Eq, _eqTerm(round1Current, q));
+                        _accEqAt(_eqAccumulatorPtr(state, 3), round1Current, cache);
                         round1Current = KoalaBearExt5.square(round1Current);
                         if (i > 12) {
-                            round2Eq = KoalaBearExt5.mul(round2Eq, _eqTerm(round2Current, q));
+                            _accEqAt(_eqAccumulatorPtr(state, 4), round2Current, cache);
                             round2Current = KoalaBearExt5.square(round2Current);
                         }
                     }
                 }
             }
         }
+        statementEq = _packEqAccumulatorAt(_eqAccumulatorPtr(state, 0));
+        initialEq = _packEqAccumulatorAt(_eqAccumulatorPtr(state, 1));
+        round0Eq = _packEqAccumulatorAt(_eqAccumulatorPtr(state, 2));
+        round1Eq = _packEqAccumulatorAt(_eqAccumulatorPtr(state, 3));
+        round2Eq = _packEqAccumulatorAt(_eqAccumulatorPtr(state, 4));
     }
 
     function _evaluateInitialConstraintSingleCalldataRaw(
@@ -1491,7 +1505,7 @@ library WhirVerifierCore5 {
         );
     }
 
-    function _evaluateConstraintSelectRaw18WithPrecomputedEq(
+    function _evaluateConstraintCubicRaw18WithPrecomputedEq(
         uint256 challenge,
         uint256 eqEval,
         uint256[] memory selVars,
@@ -1503,21 +1517,21 @@ library WhirVerifierCore5 {
                 uint256 eval0;
                 uint256 eval1;
                 (eval0, eval1) =
-                    _selectPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 4, 18);
+                    _selectCubicPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 4, 18);
                 total = _hornerStep(total, challenge, eval0);
                 total = _hornerStep(total, challenge, eval1);
                 i -= 2;
             }
             if (i != 0) {
                 total = _hornerStep(
-                    total, challenge, _selectPolyEvalFixed(selVars[0], fullPoint, 4, 18)
+                    total, challenge, _selectCubicPolyEvalFixed(selVars[0], fullPoint, 4, 18)
                 );
             }
         }
         total = _hornerStep(total, challenge, eqEval);
     }
 
-    function _evaluateConstraintSelectRaw14WithPrecomputedEq(
+    function _evaluateConstraintCubicRaw14WithPrecomputedEq(
         uint256 challenge,
         uint256 eqEval,
         uint256[] memory selVars,
@@ -1529,21 +1543,21 @@ library WhirVerifierCore5 {
                 uint256 eval0;
                 uint256 eval1;
                 (eval0, eval1) =
-                    _selectPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 8, 14);
+                    _selectCubicPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 8, 14);
                 total = _hornerStep(total, challenge, eval0);
                 total = _hornerStep(total, challenge, eval1);
                 i -= 2;
             }
             if (i != 0) {
                 total = _hornerStep(
-                    total, challenge, _selectPolyEvalFixed(selVars[0], fullPoint, 8, 14)
+                    total, challenge, _selectCubicPolyEvalFixed(selVars[0], fullPoint, 8, 14)
                 );
             }
         }
         total = _hornerStep(total, challenge, eqEval);
     }
 
-    function _evaluateConstraintSelectRaw10WithPrecomputedEq(
+    function _evaluateConstraintCubicRaw10WithPrecomputedEq(
         uint256 challenge,
         uint256 eqEval,
         uint256[] memory selVars,
@@ -1554,15 +1568,16 @@ library WhirVerifierCore5 {
             for (; i > 1;) {
                 uint256 eval0;
                 uint256 eval1;
-                (eval0, eval1) =
-                    _selectPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 12, 10);
+                (eval0, eval1) = _selectCubicPolyEvalFixedPair(
+                    selVars[i - 1], selVars[i - 2], fullPoint, 12, 10
+                );
                 total = _hornerStep(total, challenge, eval0);
                 total = _hornerStep(total, challenge, eval1);
                 i -= 2;
             }
             if (i != 0) {
                 total = _hornerStep(
-                    total, challenge, _selectPolyEvalFixed(selVars[0], fullPoint, 12, 10)
+                    total, challenge, _selectCubicPolyEvalFixed(selVars[0], fullPoint, 12, 10)
                 );
             }
         }
@@ -1641,96 +1656,42 @@ library WhirVerifierCore5 {
         );
     }
 
-    function _selectPolyEvalFixed(
-        uint256 var_,
-        uint256[] memory fullPoint,
+    function _selectCubicPolyEvalFixed(
+        uint256 current,
+        uint256[] memory cache,
         uint256 pointOffset,
-        uint256 numVariables
-    ) internal pure returns (uint256 acc) {
-        acc = KoalaBearExt5.ONE;
-        uint256 current = var_;
-
+        uint256 n
+    ) internal pure returns (uint256) {
+        if (n == 0) return uint256(1) << 224;
         unchecked {
-            for (uint256 i = numVariables; i > 0; --i) {
-                uint256 scalar = current == 0 ? KoalaBear.MODULUS - 1 : current - 1;
-                acc = _mulBySelectTermExt5(acc, fullPoint[pointOffset + i - 1], scalar);
-                current = KoalaBear.mul(current, current);
+            // `_prepareSelectCubicPairs` stores pairs (4,5), (6,7), ... at 160-byte strides.
+            // Start from the pair ending at `pointOffset + n - 1` and walk backwards.
+            uint256 pairIndex = (pointOffset + n - 6) / 2;
+            uint256 ptr;
+            assembly ("memory-safe") { ptr := add(add(cache, 32), mul(pairIndex, 160)) }
+            (uint256 low, uint256 rev, uint256 next) = _evaluateSelectCubicPair(ptr, current);
+            for (uint256 i = n / 2 - 1; i > 0; --i) {
+                ptr -= 160;
+                uint256 bLow;
+                uint256 bRev;
+                (bLow, bRev, next) = _evaluateSelectCubicPair(ptr, next);
+                (low, rev) = _mulSelectCubicForms(low, rev, bLow, bRev);
             }
+            return _packSelectCubicForms(low, rev);
         }
     }
 
-    function _selectPolyEvalFixedPair(
-        uint256 var0,
-        uint256 var1,
-        uint256[] memory fullPoint,
-        uint256 pointOffset,
-        uint256 numVariables
-    ) internal pure returns (uint256 acc0, uint256 acc1) {
-        acc0 = KoalaBearExt5.ONE;
-        acc1 = KoalaBearExt5.ONE;
-        uint256 current0 = var0;
-        uint256 current1 = var1;
-
-        unchecked {
-            for (uint256 i = numVariables; i > 0; --i) {
-                uint256 pointValue = fullPoint[pointOffset + i - 1];
-                uint256 scalar0 = current0 == 0 ? KoalaBear.MODULUS - 1 : current0 - 1;
-                uint256 scalar1 = current1 == 0 ? KoalaBear.MODULUS - 1 : current1 - 1;
-                acc0 = _mulBySelectTermExt5(acc0, pointValue, scalar0);
-                acc1 = _mulBySelectTermExt5(acc1, pointValue, scalar1);
-                current0 = KoalaBear.mul(current0, current0);
-                current1 = KoalaBear.mul(current1, current1);
-            }
-        }
-    }
-
-    function _mulBySelectTermExt5(uint256 acc, uint256 pointValue, uint256 scalar)
-        private
-        pure
-        returns (uint256 out)
-    {
-        assembly ("memory-safe") {
-            let M := 0x7f000001
-            let mask := 0xffffffff
-
-            let a0 := shr(224, acc)
-            let a1 := and(shr(192, acc), mask)
-            let a2 := and(shr(160, acc), mask)
-            let a3 := and(shr(128, acc), mask)
-            let a4 := and(shr(96, acc), mask)
-
-            let t0 := add(1, mul(scalar, shr(224, pointValue)))
-            let t1 := mul(scalar, and(shr(192, pointValue), mask))
-            let t2 := mul(scalar, and(shr(160, pointValue), mask))
-            let t3 := mul(scalar, and(shr(128, pointValue), mask))
-            let t4 := mul(scalar, and(shr(96, pointValue), mask))
-
-            let c0 := mul(a0, t0)
-            let c1 := add(mul(a0, t1), mul(a1, t0))
-            let c2 := add(add(mul(a0, t2), mul(a1, t1)), mul(a2, t0))
-            let c3 := add(add(add(mul(a0, t3), mul(a1, t2)), mul(a2, t1)), mul(a3, t0))
-            let c4 :=
-                add(add(add(add(mul(a0, t4), mul(a1, t3)), mul(a2, t2)), mul(a3, t1)), mul(a4, t0))
-            let c5 := add(add(add(mul(a1, t4), mul(a2, t3)), mul(a3, t2)), mul(a4, t1))
-            let c6 := add(add(mul(a2, t4), mul(a3, t3)), mul(a4, t2))
-            let c7 := add(mul(a3, t4), mul(a4, t3))
-            let c8 := mul(a4, t4)
-            let bias := shl(70, M)
-
-            out := or(
-                or(
-                    or(
-                        shl(224, mod(add(add(c0, c5), sub(bias, c8)), M)),
-                        shl(192, mod(add(c1, c6), M))
-                    ),
-                    or(
-                        shl(160, mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)),
-                        shl(128, mod(add(add(c3, sub(bias, c6)), c8), M))
-                    )
-                ),
-                shl(96, mod(add(c4, sub(bias, c7)), M))
-            )
-        }
+    function _selectCubicPolyEvalFixedPair(
+        uint256 a,
+        uint256 b,
+        uint256[] memory cache,
+        uint256 offset,
+        uint256 n
+    ) internal pure returns (uint256, uint256) {
+        return (
+            _selectCubicPolyEvalFixed(a, cache, offset, n),
+            _selectCubicPolyEvalFixed(b, cache, offset, n)
+        );
     }
 
     function _hornerStep(uint256 total, uint256 challenge, uint256 weight)
@@ -1738,7 +1699,7 @@ library WhirVerifierCore5 {
         pure
         returns (uint256)
     {
-        return KoalaBearExt5.add(KoalaBearExt5.mul(total, challenge), weight);
+        return KoalaBearPackedField.add(KoalaBearPackedField.mul(total, challenge), weight);
     }
 
     function _eqTerm(uint256 p, uint256 q) internal pure returns (uint256) {
@@ -1771,11 +1732,11 @@ library WhirVerifierCore5 {
             let c8 := mul(p4, q4)
             let bias := shl(35, M)
 
-            let m0 := mod(add(add(c0, c5), sub(bias, c8)), M)
-            let m1 := mod(add(c1, c6), M)
-            let m2 := mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)
-            let m3 := mod(add(add(c3, sub(bias, c6)), c8), M)
-            let m4 := mod(add(c4, sub(bias, c7)), M)
+            let m0 := add(add(c0, c5), sub(bias, c8))
+            let m1 := add(c1, c6)
+            let m2 := add(add(add(c2, sub(bias, c5)), c7), c8)
+            let m3 := add(add(c3, sub(bias, c6)), c8)
+            let m4 := add(c4, sub(bias, c7))
 
             let b := shl(2, M)
             let o0 := mod(add(add(add(1, shl(1, m0)), b), sub(0, add(p0, q0))), M)
@@ -1790,5 +1751,285 @@ library WhirVerifierCore5 {
             )
         }
         return out;
+    }
+
+    function _prepareSelectCubicPairs(uint256[] memory point)
+        internal
+        pure
+        returns (uint256[] memory cache)
+    {
+        cache = new uint256[](45);
+        for (uint256 i; i < 9; ++i) {
+            uint256 r = point[2 * i + 5];
+            uint256 s = point[2 * i + 4];
+            uint256 d = KoalaBearExt5.mul(r, s);
+            uint256 b = KoalaBearExt5.sub(r, d);
+            uint256 cc = KoalaBearExt5.sub(s, d);
+            uint256 a =
+                KoalaBearExt5.add(KoalaBearExt5.sub(KoalaBearExt5.sub(uint256(1) << 224, r), s), d);
+            uint256 ptr;
+            assembly ("memory-safe") { ptr := add(add(cache, 32), mul(i, 160)) }
+            _storeSelectCubicForm(ptr, a);
+            _storeSelectCubicForm(ptr + 32, b);
+            _storeSelectCubicForm(ptr + 64, cc);
+            _storeSelectCubicForm(ptr + 96, d);
+            assembly ("memory-safe") {
+                mstore(
+                    add(ptr, 128),
+                    or(
+                        or(and(shr(96, a), 0xffffffff), shl(64, and(shr(96, b), 0xffffffff))),
+                        or(
+                            shl(128, and(shr(96, cc), 0xffffffff)),
+                            shl(192, and(shr(96, d), 0xffffffff))
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    function _mulSelectCubicForms(uint256 aLow, uint256 aRev, uint256 bLow, uint256 bRev)
+        private
+        pure
+        returns (uint256 lowOut, uint256 revOut)
+    {
+        assembly ("memory-safe") {
+            let M := 0x7f000001
+            let c4 :=
+                add(
+                    shr(192, mul(aLow, or(shr(64, bLow), shl(192, and(bRev, 0xffffffff))))),
+                    mul(and(aRev, 0xffffffff), and(bLow, 0xffffffff))
+                )
+            let low := mul(aLow, bLow)
+            let high := mul(aRev, bRev)
+            let c0 := and(low, 0xffffffffffffffff)
+            let c1 := and(shr(64, low), 0xffffffffffffffff)
+            let c2 := and(shr(128, low), 0xffffffffffffffff)
+            let c3 := shr(192, low)
+            let c5 := shr(192, high)
+            let c6 := and(shr(128, high), 0xffffffffffffffff)
+            let c7 := and(shr(64, high), 0xffffffffffffffff)
+            let c8 := and(high, 0xffffffffffffffff)
+            let bias := shl(40, M)
+            let o0 := mod(add(add(c0, c5), sub(bias, c8)), M)
+            let o1 := mod(add(c1, c6), M)
+            let o2 := mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)
+            let o3 := mod(add(add(c3, sub(bias, c6)), c8), M)
+            let o4 := mod(add(c4, sub(bias, c7)), M)
+            lowOut := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
+            revOut := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
+        }
+    }
+
+    function _packSelectCubicForms(uint256 low, uint256 rev) private pure returns (uint256 out) {
+        assembly ("memory-safe") {
+            out := or(
+                or(
+                    or(shl(224, and(low, 0xffffffff)), shl(192, and(shr(64, low), 0xffffffff))),
+                    or(shl(160, and(shr(128, low), 0xffffffff)), shl(128, shr(192, low)))
+                ),
+                shl(96, and(rev, 0xffffffff))
+            )
+        }
+    }
+
+    function _evaluateSelectCubicPair(uint256 ptr, uint256 x)
+        private
+        pure
+        returns (uint256 lowOut, uint256 revOut, uint256 next)
+    {
+        assembly ("memory-safe") {
+            let M := 0x7f000001
+            let x2 := mulmod(x, x, M)
+            let x3 := mulmod(x2, x, M)
+            next := mulmod(x2, x2, M)
+            let low :=
+                add(
+                    add(mload(ptr), mul(mload(add(ptr, 32)), x)),
+                    add(mul(mload(add(ptr, 64)), x2), mul(mload(add(ptr, 96)), x3))
+                )
+            let last :=
+                shr(
+                    192,
+                    mul(mload(add(ptr, 128)), or(or(x3, shl(64, x2)), or(shl(128, x), shl(192, 1))))
+                )
+            let o0 := mod(and(low, 0xffffffffffffffff), M)
+            let o1 := mod(and(shr(64, low), 0xffffffffffffffff), M)
+            let o2 := mod(and(shr(128, low), 0xffffffffffffffff), M)
+            let o3 := mod(shr(192, low), M)
+            let o4 := mod(last, M)
+            lowOut := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
+            revOut := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
+        }
+    }
+
+    function _storeSelectCubicForm(uint256 ptr, uint256 b) private pure {
+        assembly ("memory-safe") {
+            mstore(
+                ptr,
+                or(
+                    or(shr(224, b), shl(64, and(shr(192, b), 0xffffffff))),
+                    or(
+                        shl(128, and(shr(160, b), 0xffffffff)),
+                        shl(192, and(shr(128, b), 0xffffffff))
+                    )
+                )
+            )
+        }
+    }
+
+    function _eqTermForms(uint256 acc, uint256[4] memory cache)
+        internal
+        pure
+        returns (uint256 outLow, uint256 outRev)
+    {
+        assembly ("memory-safe") {
+            let M := 0x7f000001
+            let mask := 0xffffffff
+
+            let low
+            let high
+            let c4
+            {
+                let a0 := mod(add(shr(224, acc), shr(1, M)), M)
+                let a1 := and(shr(192, acc), mask)
+                let a2 := and(shr(160, acc), mask)
+                let a3 := and(shr(128, acc), mask)
+                let a4 := and(shr(96, acc), mask)
+                let bLow := mload(cache)
+                let aLow := or(or(a0, shl(64, a1)), or(shl(128, a2), shl(192, a3)))
+                c4 := add(
+                    shr(192, mul(aLow, mload(add(cache, 32)))),
+                    mul(a4, and(bLow, 0xffffffff))
+                )
+                low := mul(aLow, bLow)
+                high := mul(
+                    or(or(a4, shl(64, a3)), or(shl(128, a2), shl(192, a1))),
+                    mload(add(cache, 64))
+                )
+            }
+            let laneMask := 0xffffffffffffffff
+            let c0 := and(low, laneMask)
+            let c1 := and(shr(64, low), laneMask)
+            let c2 := and(shr(128, low), laneMask)
+            let c3 := shr(192, low)
+            let c5 := shr(192, high)
+            let c6 := and(shr(128, high), laneMask)
+            let c7 := and(shr(64, high), laneMask)
+            let c8 := and(high, laneMask)
+            let bias := shl(40, M)
+            let o0 := mod(add(shl(1, add(add(c0, c5), sub(bias, c8))), add(shr(1, M), 1)), M)
+            let o1 := mod(shl(1, add(c1, c6)), M)
+            let o2 := mod(shl(1, add(add(add(c2, sub(bias, c5)), c7), c8)), M)
+            let o3 := mod(shl(1, add(add(c3, sub(bias, c6)), c8)), M)
+            let o4 := mod(shl(1, add(c4, sub(bias, c7))), M)
+            outLow := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
+            outRev := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
+        }
+    }
+
+    function _mulEqTermForms(uint256 aLow, uint256 aRev, uint256 bLow, uint256 bRev)
+        internal
+        pure
+        returns (uint256 outLow, uint256 outRev)
+    {
+        assembly ("memory-safe") {
+            let M := 0x7f000001
+            let mask := 0xffffffff
+
+            let low := mul(aLow, bLow)
+            let high := mul(aRev, bRev)
+            let c4 :=
+                add(
+                    shr(192, mul(aLow, or(shr(64, bLow), shl(192, and(bRev, 0xffffffff))))),
+                    mul(and(aRev, 0xffffffff), and(bLow, 0xffffffff))
+                )
+            let laneMask := 0xffffffffffffffff
+            let c0 := and(low, laneMask)
+            let c1 := and(shr(64, low), laneMask)
+            let c2 := and(shr(128, low), laneMask)
+            let c3 := shr(192, low)
+            let c5 := shr(192, high)
+            let c6 := and(shr(128, high), laneMask)
+            let c7 := and(shr(64, high), laneMask)
+            let c8 := and(high, laneMask)
+            let bias := shl(40, M)
+            let o0 := mod(add(add(c0, c5), sub(bias, c8)), M)
+            let o1 := mod(add(c1, c6), M)
+            let o2 := mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)
+            let o3 := mod(add(add(c3, sub(bias, c6)), c8), M)
+            let o4 := mod(add(c4, sub(bias, c7)), M)
+            outLow := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
+            outRev := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
+        }
+    }
+
+    function _eqAccumulatorPtr(uint256[10] memory state, uint256 index)
+        private
+        pure
+        returns (uint256 ptr)
+    {
+        assembly ("memory-safe") { ptr := add(state, shl(6, index)) }
+    }
+
+    function _initialEqAt(uint256 ptr, uint256 a, uint256[4] memory cache) private pure {
+        (uint256 low, uint256 rev) = _eqTermForms(a, cache);
+        assembly ("memory-safe") {
+            mstore(ptr, low)
+            mstore(add(ptr, 32), rev)
+        }
+    }
+
+    function _accEqAt(uint256 ptr, uint256 a, uint256[4] memory cache) private pure {
+        (uint256 low, uint256 rev) = _eqTermForms(a, cache);
+        uint256 aLow;
+        uint256 aRev;
+        assembly ("memory-safe") {
+            aLow := mload(ptr)
+            aRev := mload(add(ptr, 32))
+        }
+        (low, rev) = _mulEqTermForms(aLow, aRev, low, rev);
+        assembly ("memory-safe") {
+            mstore(ptr, low)
+            mstore(add(ptr, 32), rev)
+        }
+    }
+
+    function _packEqAccumulatorAt(uint256 ptr) private pure returns (uint256) {
+        uint256 low;
+        uint256 rev;
+        assembly ("memory-safe") {
+            low := mload(ptr)
+            rev := mload(add(ptr, 32))
+        }
+        return _packEqTermForms(low, rev);
+    }
+
+    function _packEqTermForms(uint256 low, uint256 rev) private pure returns (uint256 out) {
+        assembly ("memory-safe") {
+            out := or(
+                or(
+                    or(shl(224, and(low, 0xffffffff)), shl(192, and(shr(64, low), 0xffffffff))),
+                    or(shl(160, and(shr(128, low), 0xffffffff)), shl(128, shr(192, low)))
+                ),
+                shl(96, and(rev, 0xffffffff))
+            )
+        }
+    }
+
+    function _prepareEqTermForms(uint256 q, uint256[4] memory cache) internal pure {
+        assembly ("memory-safe") {
+            let M := 0x7f000001
+            let q0 := and(shr(224, q), 0xffffffff)
+            let q1 := and(shr(192, q), 0xffffffff)
+            let q2 := and(shr(160, q), 0xffffffff)
+            let q3 := and(shr(128, q), 0xffffffff)
+            let q4 := and(shr(96, q), 0xffffffff)
+            q0 := mod(add(q0, shr(1, M)), M)
+            let low := or(or(q0, shl(64, q1)), or(shl(128, q2), shl(192, q3)))
+            mstore(cache, low)
+            mstore(add(cache, 32), or(shr(64, low), shl(192, q4)))
+            mstore(add(cache, 64), or(or(q4, shl(64, q3)), or(shl(128, q2), shl(192, q1))))
+        }
     }
 }

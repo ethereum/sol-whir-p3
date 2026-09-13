@@ -317,25 +317,26 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
             round2OodPoint,
             allRandomness
         );
+        uint256[] memory packedPoint = WhirVerifierCore5._prepareSelectCubicPairs(allRandomness);
         uint256 evaluationOfWeights = WhirVerifierCore5._combineInitialConstraintEvalsSingleRaw(
             initialConstraintChallenge, statementEq, initialEq
         );
         evaluationOfWeights = KoalaBearExt5.add(
             evaluationOfWeights,
-            WhirVerifierCore5._evaluateConstraintSelectRaw18WithPrecomputedEq(
-                round0ConstraintChallenge, round0Eq, round0SelVars, allRandomness
+            WhirVerifierCore5._evaluateConstraintCubicRaw18WithPrecomputedEq(
+                round0ConstraintChallenge, round0Eq, round0SelVars, packedPoint
             )
         );
         evaluationOfWeights = KoalaBearExt5.add(
             evaluationOfWeights,
-            WhirVerifierCore5._evaluateConstraintSelectRaw14WithPrecomputedEq(
-                round1ConstraintChallenge, round1Eq, round1SelVars, allRandomness
+            WhirVerifierCore5._evaluateConstraintCubicRaw14WithPrecomputedEq(
+                round1ConstraintChallenge, round1Eq, round1SelVars, packedPoint
             )
         );
         evaluationOfWeights = KoalaBearExt5.add(
             evaluationOfWeights,
-            WhirVerifierCore5._evaluateConstraintSelectRaw10WithPrecomputedEq(
-                round2ConstraintChallenge, round2Eq, round2SelVars, allRandomness
+            WhirVerifierCore5._evaluateConstraintCubicRaw10WithPrecomputedEq(
+                round2ConstraintChallenge, round2Eq, round2SelVars, packedPoint
             )
         );
         uint256 finalValue = WhirVerifierCore5._evaluateFinalValueBlob(
