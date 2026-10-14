@@ -13,6 +13,58 @@ library WhirVerifierCore4 {
     using KeccakChallenger for KeccakChallenger.State;
 
     uint256 internal constant EXT4_ONE = uint256(1) << 224;
+    bytes private constant POW_TABLE_1816824389 =
+        hex"000000016c4a8a45163bd49958ff6e906e2f4d7a65d3aa2e57421f5d71352c4c45a60e616428b7e3665070516566002c4cd7bb26247e1bfa75386aad37c43dd9000000013e687d4d303964b2300ba3ce768fc6fa2cb3f80a3f56e3af3446e3ab7744959c3b725f621e9330746107e94c437ce0a445b5bd2e7e77ea690409289300000001334d48c727ad539b54d7833617668b8a540363e73546ad0e0b4d176329b75a801da1678948d2e0073f9e4a46654a8bad7d598a0369af7ef41ed33131000000015c4a5b990a28f03164a0e08708dbd69c4154af7e5af0e6ec6931c06d6832fe4a4489a82a226210df1d14ebfe27ae21e2309bb4e5433bb7737348d2db000000017e0100027f00000000feffff000000017e0100027f00000000feffff000000017e0100027f00000000feffff000000017e0100027f00000000feffff";
+    bytes private constant POW_TABLE_373019801 =
+        hex"00000001163bd4996e2f4d7a57421f5d45a60e61665070514cd7bb2675386aad3e687d4d1908abb42a79b9947e1ad39c4625f2a217aa4b5f2cf219ca03bc565600000001303964b2768fc6fa3f56e3af7744959c1e933074437ce0a47e77ea69334d48c740fe646a100753d77ca12bf875227a3325957b534451b86f52a36f8f0000000127ad539b17668b8a3546ad0e29b75a8048d2e007654a8bad69af7ef45c4a5b995b47c55d3cc6248a171639a5586ff04e04c4aab70a9a56263bbe793a000000010a28f03108dbd69c5af0e6ec6832fe4a226210df27ae21e2433bb7737e0100026d6e568d3a89a0253893800a174e365063861a5027dfce221335b668000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000000000017f000000";
+    bytes private constant POW_TABLE_1848593786 =
+        hex"000000016e2f4d7a45a60e614cd7bb263e687d4d2a79b9944625f2a22cf219ca303964b27d7ab4647e3a7e880063424d300ba3ce32f3e5cc5f9907a95b51c37800000001768fc6fa7744959c437ce0a4334d48c7100753d775227a334451b86f27ad539b1078181c32313d6e122f94c954d783364ae7845b425d36ed49f18ebe0000000117668b8a29b75a80654a8bad5c4a5b993cc6248a586ff04e0a9a56260a28f0312322d8145599fb2c74247efc64a0e08711e1ba5100d2f0dd4e64f8210000000108dbd69c6832fe4a27ae21e27e0100023a89a025174e365027dfce227f0000007624296516cd01b75751de1f00feffff44765fdc67b1c9b1572031df";
+
+    function _fillSelVarsPow(uint256[] memory values, uint256 base, uint256 count) private pure {
+        uint256 freePtr;
+        assembly ("memory-safe") {
+            freePtr := mload(0x40)
+        }
+
+        bytes memory table;
+        if (base == 1_816_824_389) {
+            table = POW_TABLE_1816824389;
+        } else if (base == 373_019_801) {
+            table = POW_TABLE_373019801;
+        } else if (base == 1_848_593_786) {
+            table = POW_TABLE_1848593786;
+        } else {
+            unchecked {
+                for (uint256 i = 0; i < count; ++i) {
+                    values[i] = KoalaBear.pow(base, values[i]);
+                }
+            }
+            return;
+        }
+
+        assembly ("memory-safe") {
+            let modulus := 0x7f000001
+            let tableStart := add(table, 0x20)
+            let tableEnd := add(tableStart, mload(table))
+            let valuesPtr := add(values, 0x20)
+            let valuesEnd := add(valuesPtr, shl(5, count))
+            for { let valuePtr := valuesPtr } lt(valuePtr, valuesEnd) {
+                valuePtr := add(valuePtr, 0x20)
+            } {
+                let exponent := mload(valuePtr)
+                let result := 1
+                for { let windowPtr := tableStart } lt(windowPtr, tableEnd) {
+                    windowPtr := add(windowPtr, 0x40)
+                } {
+                    let digit := and(exponent, 0x0f)
+                    result := mulmod(result, shr(224, mload(add(windowPtr, shl(2, digit)))), modulus)
+                    exponent := shr(4, exponent)
+                }
+                mstore(valuePtr, result)
+            }
+            mstore(0x40, freePtr)
+        }
+    }
 
     struct EqStatement {
         uint256 numVariables;
@@ -932,6 +984,10 @@ library WhirVerifierCore4 {
             mstore(0x40, add(add(rowEvals, 0x20), shl(5, count)))
         }
 
+        uint256 weightsPtr = WhirVerifierUtils4._prepareBaseRadix80(
+            WhirVerifierUtils4._computeDim4EqWeights(p0, p1, p2, p3)
+        );
+
         unchecked {
             uint256 prevIdx;
             for (uint256 i = 0; i < count; ++i) {
@@ -943,7 +999,7 @@ library WhirVerifierCore4 {
 
                 uint256 rowOffset = valuesOffset + i * 64;
                 (bytes32 hash, uint256 evalValue) = WhirVerifierUtils4._hashAndEvaluateBaseRowDim4BlobPackedPoints(
-                    blob, rowOffset, p0, p1, p2, p3
+                    blob, rowOffset, weightsPtr
                 );
                 rowEvals[i] = evalValue;
 
@@ -1094,11 +1150,10 @@ library WhirVerifierCore4 {
             // a second allocation; the loop below overwrites each sorted index with g^index
             // only after Merkle verification has already consumed the original indices.
             selVars = indices;
+            _fillSelVarsPow(indices, foldedDomainGen, numQueries);
 
             for (uint256 i = numQueries; i > 0; --i) {
                 uint256 idx = i - 1;
-                uint256 point = KoalaBear.pow(foldedDomainGen, indices[idx]);
-                selVars[idx] = point;
                 claimedContribution = _hornerStep(claimedContribution, challenge, rowEvals[idx]);
             }
 
@@ -1168,9 +1223,7 @@ library WhirVerifierCore4 {
                 revert MerkleRootMismatch(expectedRoot, computedRoot);
             }
 
-            for (uint256 i = 0; i < numQueries; ++i) {
-                indices[i] = KoalaBear.pow(foldedDomainGen, indices[i]);
-            }
+            _fillSelVarsPow(indices, foldedDomainGen, numQueries);
 
             uint256 mismatchPlusOne = WhirVerifierUtils4.checkHornerBaseBlob16Matches(
                 blob, finalPolyOffset, indices, rowEvals

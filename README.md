@@ -25,6 +25,7 @@ See [AGENTS.md](AGENTS.md) for schedule-specific export, gas measurement, compil
 
 | Target | Contract | Public entrypoint |
 | --- | --- | --- |
+| KoalaBear quartic, `lir6_ff5_rsv1` (80-bit target, `2^16` entries) | [`WhirBlobVerifierNative4`](src/whir/lir6/WhirBlobVerifierNative4_lir6_ff5_rsv1.sol) | `verify(bytes32,bytes)` |
 | KoalaBear quintic, `k22_jb100_ext5_lir4_ff4_rsv3_pow28` | [`WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28`](src/whir/k22_jb100_ext5_lir4_ff4_rsv3_pow28/WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28.sol) | `verify(bytes32,bytes)` |
 | BabyBear quintic, `k22_jb100_ext5_lir4_ff4_rsv3_pow28` | [`BabyBearWhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28`](src/whir/babybear_k22_jb100_ext5_lir4_ff4_rsv3_pow28/BabyBearWhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28.sol) | `verify(bytes32,bytes)` |
 | KoalaBear octic, `k22_jb100_lir6_ff4_rsv1` | [`WhirBlobVerifierNative8_k22_jb100_lir6_ff4_rsv1`](src/whir/k22_jb100_lir6_ff4_rsv1/WhirBlobVerifierNative8_k22_jb100_lir6_ff4_rsv1.sol) | `verify(bytes32,bytes)` |
@@ -75,6 +76,7 @@ python3 script/generate_leanvm_two_commitment_terminal_fixture.py \
 
 | Verifier | Foundry gas | Transaction gas | Execution gas | Calldata | Runtime / initcode |
 | --- | ---: | ---: | ---: | ---: | ---: |
+| KoalaBear quartic (80-bit target, `2^16` entries) | `824,084` | `899,380` | `718,740` | `10,276` B | `23,306` / `23,332` B |
 | KoalaBear quintic | `3,518,733` | `3,637,880` | `2,760,544` | `54,436` B | `34,898` / `34,924` B |
 | BabyBear quintic | `3,240,976` | `3,364,794` | `2,489,346` | `54,084` B | `33,780` / `33,806` B |
 | KoalaBear octic | `5,356,053` | `5,637,745` | `4,862,945` | `47,780` B | `36,710` / `36,736` B |
@@ -83,7 +85,9 @@ python3 script/generate_leanvm_two_commitment_terminal_fixture.py \
 
 Transaction gas is measured from Anvil receipts. Execution gas is `transaction gas - 21,000 - calldata gas`. The standalone measurements use `solc 0.8.28`, `via_ir`, 833 optimizer runs, and the Prague EVM target.
 
-These monolithic contracts exceed the 24,576-byte EIP-170 runtime limit. The project measures them with a 65,536-byte runtime limit and 131,072-byte initcode limit. Deployment on a network enforcing EIP-170 requires a split verifier or another architecture.
+The quartic comparison baseline uses `lir6_ff5_rsv1` and a polynomial with 16 variables and 65,536 entries. Its 23,306-byte runtime fits the 24,576-byte EIP-170 runtime limit.
+
+The quintic, octic, and LeanVM contracts exceed the 24,576-byte EIP-170 runtime limit. The project measures them with a 65,536-byte runtime limit and 131,072-byte initcode limit. Deployment on a network enforcing EIP-170 requires a split verifier or another architecture.
 
 Detailed measurement provenance and optimization records are in [the verifier optimization audit](docs/verifier-optimization-audit.md), [the BabyBear verifier results](docs/babybear-verifier-optimization-loop.md), and [the test-data retention guide](testdata/README.md).
 
