@@ -75,40 +75,44 @@ cargo run --release --manifest-path "$SPARTAN_WHIR_EXPORT_DIR/Cargo.toml" --bin 
 
 ## LeanVM Terminal Workflow
 
-The selected terminal is `LeanVmTwoCommitmentTerminal_KeccakPublicMemoryC1Pow28T6.verifyC1V1`. Keep its generated contract and the intentionally retained experimental `LeanVmGroupedTerminal_KeccakPow28T6` contract in `src/leanvm/generated/`; historical single-commitment and schedule variants belong in the workspace research archive, not in the active Foundry compilation tree.
+The selected terminal is `LeanVmGroupedTerminal_KeccakPow28T6.verifyGroupedLogupV1`. Keep its generated contract in `src/leanvm/generated/`. Preserve the shared polynomial-weight evaluator and three-root Merkle traversal when regenerating the selected grouped terminal.
+
+Generate native terminal proofs with `script/run_terminal_fixture.py` in the [LeanVM repository](https://github.com/Client-Side-Proving/leanVM). Its provenance records the client artifacts, current build sources, executable, LeanVM upstream base, and branch HEAD. The Solidity generator requires that provenance to match the current sources and exported proof. Fixed programs may occupy a smaller domain than the root execution polynomial; preserve their actual data length and prepend zero coordinates to all three program prefixes when padding the commitment.
 
 Validate the native root fixture and its opening layout without changing generated outputs:
 
 ```sh
-python3 script/generate_leanvm_two_commitment_terminal_fixture.py \
-  ../leanVM/benchmark-results/terminal-c1-b-threshold6-pow28/native/root-fixture.json \
-  KeccakPublicMemoryC1Pow28T6 \
-  --validate-only
+python3 script/generate_leanvm_grouped_terminal_fixture.py \
+  <native-root-fixture.json> \
+  GroupedLogupKeccakPow28T6 \
+  --validate-only --require-current-source
 ```
 
-To regenerate, run the same command without `--validate-only` in a tree where the generated contract, test, benchmark script, and fixture directory do not exist. The generator deliberately refuses to overwrite them.
+To regenerate, run the same command without `--validate-only` in a tree where the generated contract, test, benchmark script, and fixture directory do not exist. The generator deliberately refuses to overwrite them. If formatting generated files changes their contents, refresh their `source_sha256` entries in the fixture manifest before measurement.
 
 Focused validation:
 
 ```sh
 forge test --offline --isolate --threads 1 \
-  --match-contract LeanVmTwoCommitmentTerminal_KeccakPublicMemoryC1Pow28T6Test
+  --match-path test/LeanVmGroupedTerminal_KeccakPow28T6.t.sol
 forge test --offline --isolate --threads 1 \
-  --match-contract LeanVmGroupedTerminal_KeccakPow28T6Test
+  --match-path 'test/LeanVm*.t.sol'
 ```
 
-Measure a fresh transaction into a new output directory after `forge build`:
+Inspect the test summary and require a nonzero test count; a filter that matches nothing can exit successfully. The selected generated suite checks the complete proof, every grouped final claim, all cross values, and every Merkle batch and frontier. `testdata/grouped_logup/` retains algebra vectors and historical rejection cases; the current selected proof belongs in `testdata/leanvm_terminal/GroupedLogupKeccakPow28T6/`. Include both historical grouped proof rejection and C1 proof rejection through the grouped entry point in fresh receipt validation.
+
+Compile the selected target and measure a fresh transaction into a new output directory:
 
 ```sh
-python3 script/measure_leanvm_terminal_tx.py \
-  KeccakPublicMemoryC1Pow28T6 \
-  <new-output-directory>
+forge build --offline --force \
+  src/leanvm/generated/LeanVmGroupedTerminal_KeccakPow28T6.sol
 python3 script/measure_leanvm_terminal_tx.py \
   GroupedLogupKeccakPow28T6 \
-  <new-output-directory>
+  <new-output-directory> \
+  --reject-calldata <archived-invalid-calldata.bin>
 ```
 
-Run `forge build --offline --force` before a source-change measurement: the measurement script authenticates source hashes but reads the existing artifact and does not establish artifact freshness. It starts its own Cancun Anvil instance with the local 65,536-byte runtime allowance. The checked-in grouped LogUp terminal is an intentionally retained experimental verifier with runtime fixtures and focused tests; its full protocol-composition security remains under review. Superseded candidates, exact receipts, and other exploratory implementations belong in external research archives rather than this active Foundry project.
+The measurement script authenticates fixture hashes, compiled source metadata, and compiler settings before deploying the artifact. It starts its own Cancun Anvil instance with a local runtime-size allowance, records the gas limits and runtime/initcode sizes, checks deployed bytecode equality, and preserves successful and rejected transaction receipts. Report those local limits alongside measured gas; the receipt establishes verification under that configuration. Superseded candidates, exact receipts, and other exploratory implementations belong in external research archives rather than this active Foundry project.
 
 ## Gas Profiling with Forge Flamegraphs
 
