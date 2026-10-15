@@ -31,6 +31,7 @@ library LeanVmGroupedExecution {
         Grouped.Claims memory claims,
         uint256[] memory beta,
         Core.FixedProgramClaims memory fixedClaims,
+        Core.TwoCommitmentConfig memory fixedConfig,
         Whir.Statement memory publicStatement,
         Whir.Statement memory regionStatement,
         uint256 endingPc
@@ -72,9 +73,9 @@ library LeanVmGroupedExecution {
                 for (uint256 j; j < 4; ++j) {
                     fixedPoint[h + j] = beta[j];
                 }
-                // The validated fixed layout places the root program at prefix [1,1].
+                // Leading zero padding preserves the root program's physical offset.
                 uint256 fixedOffset = uint256(3) << (l.bytecodeLog + 4);
-                require(l.bytecodeLog + 6 == n, "GROUPED_FIXED_DIM");
+                require(l.bytecodeLog + 6 <= n, "GROUPED_FIXED_DIM");
                 groups[1][2] = Whir.Statement(
                     n, fixedPoint, consecutive(fixedOffset >> (h + 4), 8), instructions, false
                 );
@@ -122,16 +123,20 @@ library LeanVmGroupedExecution {
             );
         }
         require(at == groups[0].length, "GROUPED_STATEMENTS");
-        uint256[] memory spark = new uint256[](n);
-        for (uint256 i; i < fixedClaims.sparkPoint.length; ++i) {
-            spark[i + 1] = fixedClaims.sparkPoint[i];
-        }
+        uint256 sparkPrefixLength = fixedConfig.secondaryStatementPointPrefixLengths[0];
+        uint256[] memory spark = Core.prefixedPoint(
+            fixedConfig.secondaryStatementPointPrefixes,
+            0,
+            sparkPrefixLength,
+            fixedClaims.sparkPoint
+        );
         groups[1][0] = Whir.dense(n, spark, fixedClaims.sparkValue);
-        uint256[] memory lift = new uint256[](n);
-        lift[0] = ONE;
-        for (uint256 i; i < fixedClaims.liftPoint.length; ++i) {
-            lift[i + 2] = fixedClaims.liftPoint[i];
-        }
+        uint256[] memory lift = Core.prefixedPoint(
+            fixedConfig.secondaryStatementPointPrefixes,
+            sparkPrefixLength,
+            fixedConfig.secondaryStatementPointPrefixLengths[1],
+            fixedClaims.liftPoint
+        );
         groups[1][1] = Whir.dense(n, lift, fixedClaims.liftValue);
     }
 
@@ -218,7 +223,14 @@ library LeanVmGroupedExecution {
             false
         );
         Whir.Statement[][3] memory groups = buildStatements(
-            l, claims, beta, fixedClaims, publicStatement, regionStatement, config.endingPc
+            l,
+            claims,
+            beta,
+            fixedClaims,
+            fixedConfig,
+            publicStatement,
+            regionStatement,
+            config.endingPc
         );
         Whir.Cursor memory cursor;
         Whir.verifyThreeCommitments(

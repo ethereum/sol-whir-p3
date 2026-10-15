@@ -164,6 +164,18 @@ library LeanVmWhir {
         constraints = Constraints(gamma, statements, new uint256[](0));
     }
 
+    /// @dev The carried claim has coefficient one. Fresh claims start at gamma
+    /// so every claim uses a distinct power of the batching challenge.
+    function combineContinuation(
+        Transcript.State memory state,
+        Statement[] memory statements,
+        uint256 target,
+        uint256[] memory queryValues
+    ) internal pure returns (Constraints memory constraints, uint256 out) {
+        (constraints, out) = combine(state, statements, 0, queryValues);
+        out = EF.add(target, Packed.mul(constraints.gamma, out));
+    }
+
     function powBase(uint256 value, uint256 exponent) internal pure returns (uint256 result) {
         result = 1;
         while (exponent != 0) {
@@ -577,11 +589,11 @@ library LeanVmWhir {
         );
     }
 
-    function evaluateConstraintWeights(Constraints memory constraints, uint256[] memory point)
-        private
-        pure
-        returns (uint256 contribution)
-    {
+    function evaluateConstraintWeights(
+        Constraints memory constraints,
+        uint256[] memory point,
+        bool continuation
+    ) internal pure returns (uint256 contribution) {
         if (constraints.basePoints.length != 0) {
             uint256[] memory cache = Arithmetic.prepareBaseEq(point, 0, point.length);
             for (uint256 j = constraints.basePoints.length; j != 0; --j) {
@@ -598,11 +610,12 @@ library LeanVmWhir {
                 contribution = EF.add(Packed.mul(contribution, constraints.gamma), weights[k - 1]);
             }
         }
+        if (continuation) contribution = Packed.mul(constraints.gamma, contribution);
     }
 
     /// @dev C1 continuation rounds contain only dense OOD claims and base-field queries.
     function evaluateContinuationWeights(Constraints memory constraints, uint256[] memory point)
-        private
+        internal
         pure
         returns (uint256 contribution)
     {
@@ -620,6 +633,7 @@ library LeanVmWhir {
             uint256 w = statementCommon(constraints.statements[j - 1], point);
             contribution = EF.add(Packed.mul(contribution, constraints.gamma), w);
         }
+        contribution = Packed.mul(constraints.gamma, contribution);
     }
 
     /// @dev Shared statement factor eq(statement.point, point suffix) without slicing.
@@ -930,7 +944,7 @@ library LeanVmWhir {
         Queries memory queried
     ) private pure {
         (proofState.constraints[index + 1], proofState.target) =
-            combine(state, nextCommitment.ood, proofState.target, queried.values);
+            combineContinuation(state, nextCommitment.ood, proofState.target, queried.values);
         proofState.constraints[index + 1].basePoints = queried.points;
         (proofState.folding[index + 1], proofState.target) = Poly.sumcheck(
             state,
@@ -1010,7 +1024,8 @@ library LeanVmWhir {
         for (uint256 i; i < proofState.constraints.length; ++i) {
             uint256[] memory point = Poly.slice(allPoint, skipped, allPoint.length - skipped);
             evaluatedWeights = EF.add(
-                evaluatedWeights, evaluateConstraintWeights(proofState.constraints[i], point)
+                evaluatedWeights,
+                evaluateConstraintWeights(proofState.constraints[i], point, i != 0)
             );
             skipped += proofState.folding[i].length;
         }
@@ -1088,7 +1103,8 @@ library LeanVmWhir {
                     state, transcript, openings, cursor, params, commitment, folding[i], false, true
                 );
             }
-            (constraints[i], target) = combine(state, nextCommitment.ood, target, queried.values);
+            (constraints[i], target) =
+                combineContinuation(state, nextCommitment.ood, target, queried.values);
             constraints[i].basePoints = queried.points;
             (folding[i + 1], target) =
                 Poly.sumcheck(state, transcript, target, config.nextFold, 2, params.foldingPow);
@@ -1317,7 +1333,8 @@ library LeanVmWhir {
                     state, transcript, openings, cursor, params, commitment, folding[i], false, true
                 );
             }
-            (constraints[i], target) = combine(state, nextCommitment.ood, target, queried.values);
+            (constraints[i], target) =
+                combineContinuation(state, nextCommitment.ood, target, queried.values);
             constraints[i].basePoints = queried.points;
             (folding[i + 1], target) =
                 Poly.sumcheck(state, transcript, target, config.nextFold, 2, params.foldingPow);

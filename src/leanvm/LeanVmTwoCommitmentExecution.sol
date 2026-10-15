@@ -36,8 +36,8 @@ library LeanVmTwoCommitmentExecution {
         uint256 secondaryActualDataLength;
         uint256[2] secondaryStatementPublicMemoryOffsets;
         uint256[2] secondaryStatementPointPrefixLengths;
-        uint256[3] secondaryStatementPointPrefixes;
-        uint256[2] executionBytecodePointPrefix;
+        uint256[] secondaryStatementPointPrefixes;
+        uint256[] executionBytecodePointPrefix;
         uint256[8] expectedSecondaryRoot;
     }
 
@@ -133,31 +133,45 @@ library LeanVmTwoCommitmentExecution {
             "TWO_COMMITMENT_MODE"
         );
         require(
-            variables != 0 && variables < 256 && dimensions[0] + 1 == variables
+            variables != 0 && variables < 256 && dimensions[0] + 1 <= variables
                 && dimensions[1] + 1 == dimensions[0] && dimensions[2] == dimensions[1],
             "TWO_COMMITMENT_LAYOUT"
         );
         uint256 fullLength = uint256(1) << variables;
+        uint256 programLength = (uint256(1) << dimensions[0]) + (uint256(1) << dimensions[1])
+            + (uint256(1) << dimensions[2]);
         require(
-            twoCommitment.secondaryActualDataLength == fullLength
-                && (uint256(1) << dimensions[0]) + (uint256(1) << dimensions[1])
-                        + (uint256(1) << dimensions[2]) == fullLength,
+            twoCommitment.secondaryActualDataLength == programLength && programLength <= fullLength,
             "TWO_COMMITMENT_LENGTH"
         );
+        uint256 padding = variables - dimensions[0] - 1;
+        uint256 sparkPrefixLength = padding + 1;
+        uint256 liftPrefixLength = padding + 2;
         uint256 liftClaimLength = (dimensions[1] + 1) * 5;
         uint256 liftClaimPaddedLength = (liftClaimLength + 7) & ~uint256(7);
         require(
             twoCommitment.secondaryStatementPublicMemoryOffsets[0] == 16 + liftClaimPaddedLength
                 && twoCommitment.secondaryStatementPublicMemoryOffsets[1] == 8
-                && twoCommitment.secondaryStatementPointPrefixLengths[0] == 1
-                && twoCommitment.secondaryStatementPointPrefixLengths[1] == 2
-                && twoCommitment.secondaryStatementPointPrefixes[0] == 0
-                && twoCommitment.secondaryStatementPointPrefixes[1] == ONE
-                && twoCommitment.secondaryStatementPointPrefixes[2] == 0
-                && twoCommitment.executionBytecodePointPrefix[0] == ONE
-                && twoCommitment.executionBytecodePointPrefix[1] == ONE,
+                && twoCommitment.secondaryStatementPointPrefixLengths[0] == sparkPrefixLength
+                && twoCommitment.secondaryStatementPointPrefixLengths[1] == liftPrefixLength
+                && twoCommitment.secondaryStatementPointPrefixes.length
+                    == sparkPrefixLength + liftPrefixLength
+                && twoCommitment.executionBytecodePointPrefix.length == liftPrefixLength,
             "TWO_COMMITMENT_MEMORY"
         );
+        for (uint256 i; i < twoCommitment.secondaryStatementPointPrefixes.length; ++i) {
+            uint256 expected = i == sparkPrefixLength + padding ? ONE : 0;
+            require(
+                twoCommitment.secondaryStatementPointPrefixes[i] == expected,
+                "TWO_COMMITMENT_MEMORY"
+            );
+        }
+        for (uint256 i; i < liftPrefixLength; ++i) {
+            require(
+                twoCommitment.executionBytecodePointPrefix[i] == (i < padding ? 0 : ONE),
+                "TWO_COMMITMENT_MEMORY"
+            );
+        }
     }
 
     function appendExtension(uint256[] memory encoded, uint256 at, uint256 value)
@@ -186,9 +200,11 @@ library LeanVmTwoCommitmentExecution {
         returns (uint256[] memory encoded)
     {
         require(
-            claims.sparkPoint.length + 1 == variables && claims.liftPoint.length + 2 == variables,
+            claims.sparkPoint.length + 1 <= variables
+                && claims.liftPoint.length + 1 == claims.sparkPoint.length,
             "FIXED_PROGRAM_CLAIM_DIM"
         );
+        uint256 padding = variables - claims.sparkPoint.length - 1;
         encoded = new uint256[](24 + 10 * variables);
         encoded[0] = 0x32574f31;
         encoded[1] = 2;
@@ -196,10 +212,12 @@ library LeanVmTwoCommitmentExecution {
         uint256 at = 4;
 
         encoded[at++] = variables;
-        encoded[at++] = claims.sparkPoint.length + 1;
+        encoded[at++] = variables;
         encoded[at++] = 1;
         encoded[at++] = 0;
-        at = appendExtension(encoded, at, 0);
+        for (uint256 i; i < padding + 1; ++i) {
+            at = appendExtension(encoded, at, 0);
+        }
         for (uint256 i; i < claims.sparkPoint.length; ++i) {
             at = appendExtension(encoded, at, claims.sparkPoint[i]);
         }
@@ -207,9 +225,12 @@ library LeanVmTwoCommitmentExecution {
         at = appendExtension(encoded, at, claims.sparkValue);
 
         encoded[at++] = variables;
-        encoded[at++] = claims.liftPoint.length + 2;
+        encoded[at++] = variables;
         encoded[at++] = 1;
         encoded[at++] = 0;
+        for (uint256 i; i < padding; ++i) {
+            at = appendExtension(encoded, at, 0);
+        }
         at = appendExtension(encoded, at, ONE);
         at = appendExtension(encoded, at, 0);
         for (uint256 i; i < claims.liftPoint.length; ++i) {
@@ -218,6 +239,22 @@ library LeanVmTwoCommitmentExecution {
         encoded[at++] = 0;
         at = appendExtension(encoded, at, claims.liftValue);
         require(at == encoded.length, "FIXED_PROGRAM_OBSERVATION");
+    }
+
+    function prefixedPoint(
+        uint256[] memory prefix,
+        uint256 start,
+        uint256 length,
+        uint256[] memory point
+    ) internal pure returns (uint256[] memory out) {
+        require(start + length <= prefix.length, "FIXED_PROGRAM_PREFIX");
+        out = new uint256[](length + point.length);
+        for (uint256 i; i < length; ++i) {
+            out[i] = prefix[start + i];
+        }
+        for (uint256 i; i < point.length; ++i) {
+            out[length + i] = point[i];
+        }
     }
 
     function matchPublicMemoryExtension(uint256[] memory publicMemory, uint256 at, uint256 value)
@@ -520,24 +557,29 @@ library LeanVmTwoCommitmentExecution {
         assembly ("memory-safe") { mstore(statements, count) }
         Whir.Cursor memory cursor;
         Whir.Statement[] memory secondaryStatements = new Whir.Statement[](3);
-        uint256[] memory sparkPoint = new uint256[](fixedProgramClaims.sparkPoint.length + 1);
-        for (uint256 i; i < fixedProgramClaims.sparkPoint.length; ++i) {
-            sparkPoint[i + 1] = fixedProgramClaims.sparkPoint[i];
-        }
+        uint256 sparkPrefixLength = twoCommitmentConfig.secondaryStatementPointPrefixLengths[0];
+        uint256 liftPrefixLength = twoCommitmentConfig.secondaryStatementPointPrefixLengths[1];
+        uint256[] memory sparkPoint = prefixedPoint(
+            twoCommitmentConfig.secondaryStatementPointPrefixes,
+            0,
+            sparkPrefixLength,
+            fixedProgramClaims.sparkPoint
+        );
         secondaryStatements[0] =
             Whir.dense(layout.stacked, sparkPoint, fixedProgramClaims.sparkValue);
-        uint256[] memory liftPoint = new uint256[](fixedProgramClaims.liftPoint.length + 2);
-        liftPoint[0] = ONE;
-        for (uint256 i; i < fixedProgramClaims.liftPoint.length; ++i) {
-            liftPoint[i + 2] = fixedProgramClaims.liftPoint[i];
-        }
+        uint256[] memory liftPoint = prefixedPoint(
+            twoCommitmentConfig.secondaryStatementPointPrefixes,
+            sparkPrefixLength,
+            liftPrefixLength,
+            fixedProgramClaims.liftPoint
+        );
         secondaryStatements[1] = Whir.dense(layout.stacked, liftPoint, fixedProgramClaims.liftValue);
-        uint256[] memory rootPoint = new uint256[](logup.bytecodePoint.length + 2);
-        rootPoint[0] = twoCommitmentConfig.executionBytecodePointPrefix[0];
-        rootPoint[1] = twoCommitmentConfig.executionBytecodePointPrefix[1];
-        for (uint256 i; i < logup.bytecodePoint.length; ++i) {
-            rootPoint[i + 2] = logup.bytecodePoint[i];
-        }
+        uint256[] memory rootPoint = prefixedPoint(
+            twoCommitmentConfig.executionBytecodePointPrefix,
+            0,
+            twoCommitmentConfig.executionBytecodePointPrefix.length,
+            logup.bytecodePoint
+        );
         secondaryStatements[2] = Whir.dense(layout.stacked, rootPoint, fixedBytecodeValue);
         Whir.verifyTwoCommitments(
             state,

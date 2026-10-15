@@ -11,14 +11,14 @@ contract LeanVmGroupedTerminal_KeccakPow28T6 is LeanVmGroupedTerminalVerifier {
         config.endingPc = 131_071;
         config.rate = 6;
         config.capacity = [
-            uint256(201_076_413),
-            1_376_297_359,
-            1_693_489_495,
-            479_934_901,
-            113_757_364,
-            1_359_467_769,
-            776_561_868,
-            967_105_175
+            uint256(75_907_950),
+            145_299_416,
+            283_012_356,
+            2_002_785_192,
+            1_938_527_388,
+            1_074_857_094,
+            1_241_171_420,
+            995_158_161
         ];
         config.whir.variables = 23;
         config.whir.firstFold = 5;
@@ -47,39 +47,36 @@ contract LeanVmGroupedTerminal_KeccakPow28T6 is LeanVmGroupedTerminalVerifier {
         config.secondaryActualDataLength = 8_388_608;
         config.secondaryStatementPublicMemoryOffsets = [uint256(128), 8];
         config.secondaryStatementPointPrefixLengths = [uint256(1), 2];
-        config.secondaryStatementPointPrefixes = [
-            uint256(0),
-            26_959_946_667_150_639_794_667_015_087_019_630_673_637_144_422_540_572_481_103_610_249_216,
-            0
-        ];
-        config.executionBytecodePointPrefix = [
-            uint256(
-                26_959_946_667_150_639_794_667_015_087_019_630_673_637_144_422_540_572_481_103_610_249_216
-            ),
-            26_959_946_667_150_639_794_667_015_087_019_630_673_637_144_422_540_572_481_103_610_249_216
-        ];
+        config.secondaryStatementPointPrefixes = new uint256[](3);
+        config.secondaryStatementPointPrefixes[1] =
+        26_959_946_667_150_639_794_667_015_087_019_630_673_637_144_422_540_572_481_103_610_249_216;
+        config.executionBytecodePointPrefix = new uint256[](2);
+        config.executionBytecodePointPrefix[0] =
+        26_959_946_667_150_639_794_667_015_087_019_630_673_637_144_422_540_572_481_103_610_249_216;
+        config.executionBytecodePointPrefix[1] =
+        26_959_946_667_150_639_794_667_015_087_019_630_673_637_144_422_540_572_481_103_610_249_216;
         config.expectedSecondaryRoot = [
-            uint256(195_414_443),
-            355_672_050,
-            575_330_136,
-            197_499_168,
-            871_225_560,
-            299_717_124,
-            884_218_482,
-            593_264_179
+            uint256(886_056_696),
+            330_162_236,
+            800_875_885,
+            974_140_987,
+            978_542_848,
+            459_213_441,
+            133_560_788,
+            798_226_065
         ];
     }
 
     function liftedCapacity() internal pure virtual override returns (uint256[8] memory) {
         return [
-            uint256(292_120_851),
-            1_834_781_869,
-            538_063_231,
-            46_288_679,
-            1_784_790_716,
-            2_077_655_571,
-            68_020_209,
-            712_230_306
+            uint256(2_050_310_400),
+            335_847_278,
+            1_979_180_525,
+            1_713_299_977,
+            979_133_116,
+            1_107_287_738,
+            206_966_687,
+            2_025_698_229
         ];
     }
 }

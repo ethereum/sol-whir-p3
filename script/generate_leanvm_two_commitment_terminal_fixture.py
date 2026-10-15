@@ -23,11 +23,15 @@ from leanvm_terminal_fixture_codec import (
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO.parent / "leanVM/crates/lean_prover/python-verifier"))
 from primitives import Fp, POSEIDON16, poseidon16_compress  # noqa: E402
+sys.path.insert(0, str(REPO.parent / "leanVM/script"))
+from terminal_fixture_provenance import validate_sources  # noqa: E402
 
 MODULUS = 2_130_706_433
 ONE_PACKED = 1 << 224
 SCHEMA = "leanvm-terminal-two-commitment-fixture-v1"
 MODE = "terminal-c1-two-commitment-whir-v1"
+GROUPED_SCHEMA = "leanvm-terminal-grouped-logup-experiment-v1"
+GROUPED_MODE = "terminal-grouped-logup-three-commitment-whir-v1"
 HASH_BACKEND = "leanvm-keccak240-v1"
 MODE_TAG = 0x32570001
 STATEMENT_TAG = 0x32574F31
@@ -44,17 +48,31 @@ STATEMENT_PREFIXES = [
 ]
 
 
-def expected_opening_batches(whir, first_folding_factor, subsequent_folding_factor):
+def commitment_config(fixture):
+    """Return the fixed-program descriptor shared by both terminal modes."""
+    if fixture["schema"] != GROUPED_SCHEMA:
+        return fixture["two_commitment_whir"]
+    config = dict(fixture["three_commitment_whir"])
+    descriptor = config["static_descriptor"]["fields"]
+    config.setdefault("protocol_mode_tag", descriptor[0])
+    config.setdefault("two_commitment_batching_pow_bits", descriptor[1])
+    return config
+
+
+def expected_opening_batches(whir, first_folding_factor, subsequent_folding_factor, grouped=False):
     """Derive the batch layout implied by the exported WHIR round structure."""
     rounds = whir["rounds"]
     roles = ["primary_initial", "fixed_program_initial"]
+    if grouped:
+        roles.append("grouped_helper_initial")
+    initial_count = len(roles)
     roles += [f"continuation_{i}" for i in range(1, len(rounds))]
     roles.append("continuation_final")
     initial = rounds[0]
     assert initial["folding_factor"] == first_folding_factor
-    queries = [initial["num_queries"], initial["num_queries"]]
-    widths = [1 << first_folding_factor] * 2
-    heights = [initial["domain_size"].bit_length() - 1 - first_folding_factor] * 2
+    queries = [initial["num_queries"]] * initial_count
+    widths = [1 << first_folding_factor] * initial_count
+    heights = [initial["domain_size"].bit_length() - 1 - first_folding_factor] * initial_count
     for round_config in rounds[1:] + [whir["final_round"]]:
         assert round_config["folding_factor"] == subsequent_folding_factor
         queries.append(round_config["num_queries"])
@@ -98,13 +116,16 @@ def flatten_claim(claim):
 
 
 def expected_statement_observation(claims, variables):
+    padding = variables - len(claims["spark"]["point"]) - 1
+    assert padding >= 0
     encoded = [STATEMENT_TAG, 2, 24 + 10 * variables, 0]
     encoded.extend([variables, variables, 1, 0])
-    encoded.extend([0] * 5)
+    encoded.extend([0] * (5 * (padding + 1)))
     encoded.extend(coefficient for coordinate in claims["spark"]["point"] for coefficient in coordinate)
     encoded.append(0)
     encoded.extend(claims["spark"]["value"])
     encoded.extend([variables, variables, 1, 0])
+    encoded.extend([0] * (5 * padding))
     encoded.extend([1, 0, 0, 0, 0])
     encoded.extend([0] * 5)
     encoded.extend(coefficient for coordinate in claims["lift"]["point"] for coefficient in coordinate)
@@ -172,7 +193,7 @@ def recompute_c1_capacity(root_program_hash, profile, descriptor):
         [Fp(value) for value in SNARK_DOMAIN_SEPARATOR],
     )
     profile_fields = [
-        0x57500001,
+        0x57500002,
         profile["security_bits"],
         profile["grinding_bits"],
         profile["first_folding_factor"],
@@ -235,7 +256,7 @@ def transcript_layout(fixture):
     """Derive the selected verifier's raw transcript boundaries in base words."""
     raw = fixture["raw_transcript"]
     dimensions = raw[:5]
-    assert dimensions == [6, 19, 17, 15, 13], "selected execution dimensions"
+    assert dimensions[0] == fixture["profiles"]["node"]["log_inv_rate"]
     _, memory_log, execution_log, extension_log, poseidon_log = dimensions
     table_heights = [execution_log, extension_log, poseidon_log]
     maximum = max(table_heights)
@@ -244,7 +265,12 @@ def transcript_layout(fixture):
     for buses, height in zip([5, 16, 33], table_heights):
         active += buses << height
     gkr_variables = (active - 1).bit_length()
-    assert gkr_variables == 22, "selected GKR dimension"
+    assert 16 <= memory_log <= 26
+    assert all(8 <= height <= limit for height, limit in zip(table_heights, [26, 22, 22]))
+    assert memory_log >= max(bytecode_log, maximum)
+    stacked_entries = (2 << memory_log) + (1 << max(bytecode_log, maximum))
+    stacked_entries += sum(columns << height for columns, height in zip([20, 29, 110], table_heights))
+    assert (stacked_entries - 1).bit_length() == fixture["whir"]["num_variables"]
 
     offset = 0
 
@@ -262,28 +288,40 @@ def transcript_layout(fixture):
     consume(5)  # dimensions
     primary_root = consume(8)
     secondary_root = consume(8)
-    consume(5 * 32)
-    consume(5 * 32)
-    for layer in range(5, gkr_variables):
-        for _ in range(layer):
+    grouped = fixture["schema"] == GROUPED_SCHEMA
+    grouped_offsets = {}
+    if grouped:
+        helper_root = consume(8)
+        grouped_offsets["grouped_air"] = offset
+        heights = [memory_log - 3, bytecode_log - 3, *table_heights]
+        order = sorted(range(5), key=lambda kind: (-heights[kind], kind))
+        for _ in range(max(heights)):
+            consume(5 * 12)
+        claim_counts = [21, 21, 27, 52, 135]
+        claim_names = ["memory", "bytecode", "execution", "extension", "poseidon"]
+        for kind in order:
+            grouped_offsets["grouped_claims_" + claim_names[kind]] = consume(5 * claim_counts[kind])
+        cross_values = consume(5 * 6)
+    else:
+        consume(5 * 32)
+        consume(5 * 32)
+        for layer in range(5, gkr_variables):
+            for _ in range(layer):
+                consume(5 * 4)
             consume(5 * 4)
-        consume(5 * 4)
-    consume(5)  # memory accumulator
-    consume(5)  # memory value
-    consume(5)  # bytecode accumulator
-    for table_counts in request_column_counts():
-        consume(5)  # table numerator
-        consume(5)  # table denominator
-        for count in table_counts:
+        consume(5)  # memory accumulator
+        consume(5)  # memory value
+        consume(5)  # bytecode accumulator
+        for table_counts in request_column_counts():
+            consume(5)  # table numerator
+            consume(5)  # table denominator
+            for count in table_counts:
+                consume(5 * count)
+        for _ in range(maximum):
+            consume(5 * 12)
+        for count in [22, 42, 110]:
             consume(5 * count)
-
-    # AIR sumcheck has degree 11 and `maximum` rounds.
-    for _ in range(maximum):
-        consume(5 * 12)
-    for count in [22, 42, 110]:
-        consume(5 * count)
-
-    cross_values = consume(5 * 2)
+        cross_values = consume(5 * 2)
     batching_pow = consume(1)
     combined_ood = consume(5 * fixture["whir"]["commitment_ood_samples"])
 
@@ -308,7 +346,7 @@ def transcript_layout(fixture):
         consume(5 * 3)
 
     assert offset == len(raw), "raw transcript does not match complete selected verifier consumption"
-    return {
+    offsets = {
         "dimensions": 0,
         "primary_commitment": primary_root,
         "secondary_commitment": secondary_root,
@@ -317,32 +355,55 @@ def transcript_layout(fixture):
         "combined_ood": combined_ood,
         "consumed_fields": offset,
     }
+    if grouped:
+        offsets["helper_commitment"] = helper_root
+        offsets.update(grouped_offsets)
+    return offsets
 
 
-def validate_fixture(path):
+def validate_fixture(path, require_current_source=False, grouped=False):
     fixture = json.loads(path.read_text())
-    assert fixture["schema"] == SCHEMA
-    assert fixture["mode"] == MODE
+    if require_current_source:
+        provenance = fixture.get("source_provenance", {})
+        validate_sources(provenance, REPO.parent)
+        assert provenance["native_proof_sha256"] == fixture["proof_sha256"], "provenance proof identity"
+        assert provenance["program_mle_sha256"] == {
+            program["program"]: program["mle_sha256"] for program in fixture["bytecodes"]
+        }, "provenance program identity"
+    assert fixture["schema"] == (GROUPED_SCHEMA if grouped else SCHEMA)
+    assert fixture["mode"] == (GROUPED_MODE if grouped else MODE)
     assert fixture["hash_backend"] == HASH_BACKEND
     assert fixture["base_field_modulus"] == MODULUS
     assert fixture["extension_degree"] == 5
     assert fixture["extension_polynomial"] == "X^5 + X^2 - 1"
-    assert fixture["native_verification"] == (
+    expected_verification = (
+        "passed, including all eight root-bytecode claims and the carried spark/lift claims"
+        if grouped else
         "passed, including the integrated fixed-program commitment and all three bytecode claims"
     )
+    assert fixture["native_verification"] == expected_verification
     profiles = fixture["profiles"]
     assert profiles["terminal_keccak"] is True
     assert profiles["terminal_public_memory"] is True
     assert profiles["terminal_two_commitment"] is True
+    assert profiles.get("terminal_grouped_logup", False) is grouped
+    if grouped:
+        assert fixture["grouped_mode_observation"] == [0x474C5531, 1, 8, 3, 5, 11, 4, 0]
+        assert fixture["grouped_mode_observation_order"] == (
+            "before public input, public memory, dynamic fixed-program claims, dimensions and first commitment"
+        )
     node_profile = profiles["node"]
+    variables = fixture["whir"]["num_variables"]
+    assert PROGRAM_DIMENSIONS[0] + 1 <= variables < 31
+    padding = variables - PROGRAM_DIMENSIONS[0] - 1
     # The verifier family is pinned; the grinding budget and final-coefficient
     # threshold are schedule knobs bound into the recomputed capacity below.
-    assert node_profile["security_bits"] == 100
-    assert node_profile["first_folding_factor"] == 5
-    assert node_profile["subsequent_folding_factor"] == 4
-    assert node_profile["rs_domain_initial_reduction_factor"] == 1
-    assert node_profile["log_inv_rate"] == 6
-    assert 0 < node_profile["grinding_bits"] <= 30
+    assert node_profile["security_bits"] >= 100
+    assert 1 <= node_profile["first_folding_factor"] < variables
+    assert 1 <= node_profile["subsequent_folding_factor"] < variables
+    assert node_profile["rs_domain_initial_reduction_factor"] >= 1
+    assert node_profile["log_inv_rate"] >= 1
+    assert 0 <= node_profile["grinding_bits"] <= 30
     assert (
         node_profile["subsequent_folding_factor"] - 1
         <= node_profile["max_num_variables_to_send_coeffs"]
@@ -369,7 +430,13 @@ def validate_fixture(path):
         assert sha256(mle_file) == program["mle_sha256"]
 
     claims = fixture["bytecode_claims"]
-    assert sorted(claims) == sorted(PROGRAMS)
+    expected_claim_keys = list(PROGRAMS)
+    if grouped:
+        expected_claim_keys.append("root_diagnostic_scope")
+        assert claims["root_diagnostic_scope"] == (
+            "first of eight root evaluations; all eight are in the grouped transcript and authenticated by WHIR"
+        )
+    assert sorted(claims) == sorted(expected_claim_keys)
     for name, dimension in zip(PROGRAMS, PROGRAM_DIMENSIONS):
         claim = claims[name]
         assert len(claim["point"]) == dimension
@@ -394,18 +461,22 @@ def validate_fixture(path):
     expected_public_memory.extend(fixture["application_root"])
     assert expected_public_memory == public_memory["values"]
 
-    c1 = fixture["two_commitment_whir"]
+    c1 = commitment_config(fixture)
     assert c1["protocol_mode_tag"] == MODE_TAG
     assert c1["fiat_shamir_cap_scope"] == CAP_SCOPE
     assert c1["two_commitment_batching_pow_bits"] == 2
-    assert c1["execution_bytecode_point_prefix"] == [1, 1]
+    if grouped:
+        assert c1["three_commitment_batching_pow_bits"] == 4
+        assert c1["helper"]["num_variables"] == variables
+    assert c1["execution_bytecode_point_prefix"] == [0] * padding + [1, 1]
     assert c1["secondary_statement_public_memory_offsets"] == STATEMENT_MEMORY_OFFSETS
     bindings = c1["secondary_statement_public_memory_bindings"]
     assert [binding["public_memory_offset"] for binding in bindings] == STATEMENT_MEMORY_OFFSETS
-    assert [point_prefix_length(binding) for binding in bindings] == [1, 2]
-    assert [binding["point_prefix"] for binding in bindings] == STATEMENT_PREFIXES
+    assert [point_prefix_length(binding) for binding in bindings] == [padding + 1, padding + 2]
+    expected_prefixes = [[[0] * 5 for _ in range(padding)] + suffix for suffix in STATEMENT_PREFIXES]
+    assert [binding["point_prefix"] for binding in bindings] == expected_prefixes
     descriptor_length, descriptor = expected_static_descriptor(c1)
-    assert descriptor_length == 47 and len(descriptor) == 48
+    assert descriptor_length == 47 + 15 * padding and len(descriptor) == padded(descriptor_length)
     exported_descriptor = c1["static_descriptor"]
     assert exported_descriptor["field_count_before_padding"] == descriptor_length
     assert exported_descriptor["padded_field_count"] == len(descriptor)
@@ -416,39 +487,43 @@ def validate_fixture(path):
 
     primary = c1["primary"]
     secondary = c1["secondary"]
-    assert primary["num_variables"] == 23
+    assert primary["num_variables"] == variables
     assert primary["actual_data_len"] == fixture["measurement"]["stacked_entries"]
     assert secondary["layout"] == list(PROGRAMS)
     assert secondary["program_dimensions"] == PROGRAM_DIMENSIONS
-    assert secondary["num_variables"] == 23
+    assert secondary["num_variables"] == variables
     assert secondary["actual_data_len"] == 1 << 23
+    assert secondary["actual_data_len"] <= 1 << variables
     assert sum(program["mle_fields"] for program in programs) == secondary["actual_data_len"]
     validate_digest(secondary["trusted_root"], "fixed-program commitment")
     assert fixture["raw_transcript"][16:24] == secondary["trusted_root"]
 
     observation = c1["statement_observation"]
     assert observation["tag"] == STATEMENT_TAG
-    assert observation["field_count"] == 254
+    assert observation["field_count"] == 24 + 10 * variables
     assert observation["field_count"] == len(observation["fields"])
-    assert observation["fields"] == expected_statement_observation(claims, 23)
+    assert observation["fields"] == expected_statement_observation(claims, variables)
     assert observation["transcript_order"] == (
+        "after public input and public memory; before dimensions and all three commitment roots"
+        if grouped else
         "after public input and public memory; before dimensions and both commitment roots"
     )
 
     whir = fixture["whir"]
-    assert whir["num_variables"] == 23
-    assert whir["commitment_ood_samples"] == 1
-    assert whir["starting_log_inv_rate"] == 6
+    assert whir["num_variables"] == variables
+    assert whir["commitment_ood_samples"] >= 1
+    assert whir["starting_log_inv_rate"] == node_profile["log_inv_rate"]
     assert whir["starting_folding_pow_bits"] <= node_profile["grinding_bits"]
-    assert whir["rs_domain_initial_reduction_factor"] == 1
+    assert whir["rs_domain_initial_reduction_factor"] == node_profile["rs_domain_initial_reduction_factor"]
     assert whir["final_sumcheck_rounds"] <= node_profile["max_num_variables_to_send_coeffs"]
-    assert whir["final_sumcheck_rounds"] == 23 - node_profile["first_folding_factor"] - len(
+    assert whir["final_sumcheck_rounds"] == variables - node_profile["first_folding_factor"] - len(
         whir["rounds"]
     ) * node_profile["subsequent_folding_factor"]
 
     roles, queries, widths, heights = expected_opening_batches(
-        whir, node_profile["first_folding_factor"], node_profile["subsequent_folding_factor"]
+        whir, node_profile["first_folding_factor"], node_profile["subsequent_folding_factor"], grouped
     )
+    assert all(0 <= height < 31 for height in heights), "Solidity Merkle height"
     batches = c1["opening_batches"]
     assert len(batches) == len(roles)
     assert [batch["role"] for batch in batches] == roles
@@ -501,7 +576,7 @@ def pruned_openings(fixture, proof_path):
         }
     )
     assert reader.offset == len(reader.data), "unused native proof bytes"
-    batches = fixture["two_commitment_whir"]["opening_batches"]
+    batches = commitment_config(fixture)["opening_batches"]
     assert len(groups) == len(batches), "native multiproof group count"
 
     output = bytearray()
@@ -556,10 +631,16 @@ def safe_low_byte_xor(value):
 
 
 def generated_contract(contract, fixture, programs, lifted_capacity):
-    c1 = fixture["two_commitment_whir"]
+    c1 = commitment_config(fixture)
     bindings = c1["secondary_statement_public_memory_bindings"]
     prefixes = [packed_extension(value) for binding in bindings for value in binding["point_prefix"]]
-    assert prefixes == [0, ONE_PACKED, 0]
+    execution_prefix = [ONE_PACKED * value for value in c1["execution_bytecode_point_prefix"]]
+    prefix_assignments = []
+    for name, values in [("secondaryStatementPointPrefixes", prefixes), ("executionBytecodePointPrefix", execution_prefix)]:
+        prefix_assignments.append(f"        config.{name} = new uint256[]({len(values)});")
+        for index, value in enumerate(values):
+            if value:
+                prefix_assignments.append(f"        config.{name}[{index}] = {value};")
     code = f'''// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -599,8 +680,7 @@ contract {contract} is LeanVmTwoCommitmentTerminalVerifier {{
         config.secondaryActualDataLength = {c1['secondary']['actual_data_len']};
         config.secondaryStatementPublicMemoryOffsets = {array_literal(c1['secondary_statement_public_memory_offsets'])};
         config.secondaryStatementPointPrefixLengths = {array_literal([point_prefix_length(binding) for binding in bindings])};
-        config.secondaryStatementPointPrefixes = {array_literal(prefixes)};
-        config.executionBytecodePointPrefix = {array_literal([ONE_PACKED, ONE_PACKED])};
+{chr(10).join(prefix_assignments)}
         config.expectedSecondaryRoot = {array_literal(c1['secondary']['trusted_root'])};
     }}
 
@@ -824,16 +904,95 @@ contract {contract}TxBenchmark is Script {{
 '''
 
 
-def main():
+def grouped_generated_test(contract, label, offsets, groups, openings, raw, claims):
+    code = generated_test(contract, label, offsets, groups, openings, raw, claims)
+    code = code.replace("LeanVmTwoCommitmentTerminalVerifier", "LeanVmGroupedTerminalVerifier")
+    code = code.replace("verifyC1V1", "verifyGroupedLogupV1")
+    code = code.replace("testCompleteTwoCommitmentTerminal", "testCompleteGroupedTerminal")
+    code = code.replace("two-commitment terminal", "grouped terminal")
+    helper = groups[2]["offset"]
+    mask = safe_low_byte_xor(int.from_bytes(openings[helper:helper + 4], "big"))
+    extra = f'''
+    function testRejectHelperCommitment() external {{
+        LeanVmGroupedTerminalVerifier.Proof memory proof = loadProof();
+        proof.transcript[{4 * offsets['helper_commitment']}] ^= bytes1(0x01);
+        vm.expectRevert();
+        verifier.verifyGroupedLogupV1(proof);
+    }}
+
+    function testRejectHelperInitialOpening() external {{
+        LeanVmGroupedTerminalVerifier.Proof memory proof = loadProof();
+        proof.openings[{helper + 3}] ^= bytes1(uint8({mask}));
+        vm.expectRevert("MERKLE_ROOT");
+        verifier.verifyGroupedLogupV1(proof);
+    }}
+
+    function testCalldataMatchesExport() external view {{
+        assertEq(
+            abi.encodeCall(verifier.verifyGroupedLogupV1, (loadProof())),
+            vm.readFileBinary("testdata/leanvm_terminal/{label}/calldata.bin")
+        );
+    }}
+'''
+    for name, count in [("memory", 21), ("bytecode", 21), ("execution", 27), ("extension", 52), ("poseidon", 135), ("cross", 6)]:
+        start = offsets["cross_values" if name == "cross" else "grouped_claims_" + name]
+        masks = [safe_low_byte_xor(raw[start + 5 * i]) for i in range(count)]
+        extra += f'''
+    function testRejectEvery{name.title()}Claim() external {{
+        LeanVmGroupedTerminalVerifier.Proof memory proof = loadProof();
+        uint256[{count}] memory masks = {array_literal(masks)};
+        for (uint256 i; i < {count}; ++i) {{
+            proof.transcript[{4 * start} + 20 * i] ^= bytes1(uint8(masks[i]));
+            vm.expectRevert();
+            verifier.verifyGroupedLogupV1(proof);
+            proof.transcript[{4 * start} + 20 * i] ^= bytes1(uint8(masks[i]));
+        }}
+    }}
+'''
+    starts = [group["offset"] for group in groups]
+    ends = [group["offset"] + group["bytes"] for group in groups]
+    masks = [safe_low_byte_xor(int.from_bytes(openings[start:start + 4], "big")) for start in starts]
+    count = len(groups)
+    extra += f'''
+    function testRejectEveryOpeningBatch() external {{
+        LeanVmGroupedTerminalVerifier.Proof memory proof = loadProof();
+        uint256[{count}] memory starts = {array_literal(starts)};
+        uint256[{count}] memory masks = {array_literal(masks)};
+        for (uint256 i; i < {count}; ++i) {{
+            proof.openings[starts[i] + 3] ^= bytes1(uint8(masks[i]));
+            vm.expectRevert("MERKLE_ROOT");
+            verifier.verifyGroupedLogupV1(proof);
+            proof.openings[starts[i] + 3] ^= bytes1(uint8(masks[i]));
+        }}
+    }}
+
+    function testRejectEveryOpeningFrontier() external {{
+        LeanVmGroupedTerminalVerifier.Proof memory proof = loadProof();
+        uint256[{count}] memory ends = {array_literal(ends)};
+        for (uint256 i; i < {count}; ++i) {{
+            proof.openings[ends[i] - 1] ^= bytes1(0x01);
+            vm.expectRevert();
+            verifier.verifyGroupedLogupV1(proof);
+            proof.openings[ends[i] - 1] ^= bytes1(0x01);
+        }}
+    }}
+'''
+    return code.rsplit("}", 1)[0] + extra + "}\n"
+
+
+def main(grouped=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root_fixture", type=Path)
     parser.add_argument("label")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--require-current-source", action="store_true")
     args = parser.parse_args()
     assert args.label.replace("_", "").isalnum() and args.label[0].isalpha()
 
     fixture, programs, claims, lifted_capacity, proof_path, transcript_offsets = validate_fixture(
-        args.root_fixture
+        args.root_fixture,
+        require_current_source=args.require_current_source or not args.validate_only,
+        grouped=grouped,
     )
     opening_bytes, opening_groups, compressed_transcript_fields = pruned_openings(
         fixture, proof_path
@@ -852,7 +1011,10 @@ def main():
         return
 
     label = args.label
-    contract = "LeanVmTwoCommitmentTerminal_" + label
+    contract = (
+        "LeanVmGroupedTerminal_" + label.removeprefix("GroupedLogup")
+        if grouped else "LeanVmTwoCommitmentTerminal_" + label
+    )
     source = REPO / "src/leanvm/generated" / f"{contract}.sol"
     test = REPO / "test" / f"{contract}.t.sol"
     benchmark = REPO / "script" / f"{contract}.s.sol"
@@ -880,12 +1042,20 @@ def main():
         ]
     )
     encoded = tuple_encoding([(True, proof)])
-    signature = "verifyC1V1((bytes,bytes,uint256[8],uint256[],uint256,uint256[],uint256,uint256))"
+    entry_point = "verifyGroupedLogupV1" if grouped else "verifyC1V1"
+    signature = entry_point + "((bytes,bytes,uint256[8],uint256[],uint256,uint256[],uint256,uint256))"
     calldata = keccak256(signature.encode())[:4] + encoded
 
-    source.write_text(generated_contract(contract, fixture, programs, lifted_capacity))
+    source_code = generated_contract(contract, fixture, programs, lifted_capacity)
+    benchmark_code = generated_benchmark(contract, label)
+    if grouped:
+        source_code = source_code.replace("LeanVmTwoCommitmentTerminalVerifier", "LeanVmGroupedTerminalVerifier")
+        benchmark_code = benchmark_code.replace("LeanVmTwoCommitmentTerminalVerifier", "LeanVmGroupedTerminalVerifier")
+        benchmark_code = benchmark_code.replace("verifyC1V1", entry_point)
+        benchmark_code = benchmark_code.replace("two-commitment terminal", "grouped terminal")
+    source.write_text(source_code)
     test.write_text(
-        generated_test(
+        (grouped_generated_test if grouped else generated_test)(
             contract,
             label,
             transcript_offsets,
@@ -895,7 +1065,7 @@ def main():
             claims,
         )
     )
-    benchmark.write_text(generated_benchmark(contract, label))
+    benchmark.write_text(benchmark_code)
     (data / "proof.abi").write_bytes(encoded)
     (data / "calldata.bin").write_bytes(calldata)
 
@@ -911,13 +1081,16 @@ def main():
         Path(__file__).with_name("leanvm_terminal_fixture_codec.py"),
         Path(__file__).resolve(),
     ]
+    if grouped:
+        source_files.append(Path(__file__).with_name("generate_leanvm_grouped_terminal_fixture.py"))
+    commitment_key = "three_commitment_whir" if grouped else "two_commitment_whir"
     manifest = {
-        "schema": "leanvm-terminal-two-commitment-solidity-fixture-v1",
+        "schema": "leanvm-terminal-grouped-solidity-fixture-v1" if grouped else "leanvm-terminal-two-commitment-solidity-fixture-v1",
         "native_fixture_schema": fixture["schema"],
         "native_root_fixture_sha256": sha256(args.root_fixture),
         "native_proof_sha256": fixture["proof_sha256"],
         "contract": contract,
-        "entry_point": "verifyC1V1",
+        "entry_point": entry_point,
         "abi_argument_bytes": len(encoded),
         "calldata_bytes": len(calldata),
         "calldata_zero_bytes": calldata.count(0),
@@ -936,13 +1109,22 @@ def main():
         "openings_codec": "multiproof30",
         "hash_backend": fixture["hash_backend"],
         "fiat_shamir_cap": fixture["fiat_shamir_cap"],
-        "two_commitment_whir": fixture["two_commitment_whir"],
+        commitment_key: fixture[commitment_key],
         "programs": programs,
         "root_profile": fixture["profiles"]["node"],
+        "source_provenance": fixture["source_provenance"],
         "source_sha256": {
             str(path.relative_to(REPO)): sha256(path) for path in sorted(set(source_files))
         },
+        "verification_boundary": (
+            "Complete LeanVM grouped LogUp terminal root, three Keccak WHIR commitments, authenticated public memory and fixed-program claims"
+            if grouped else
+            "Complete C1 LeanVM root AIR, LogUp/GKR, public-memory claims, and shared WHIR opening of execution and authenticated fixed-program commitments; Keccak240 hashing"
+        ),
     }
+    if grouped:
+        manifest["grouped_mode_observation"] = fixture["grouped_mode_observation"]
+        manifest["full_composition_security_established"] = fixture["full_composition_security_established"]
     (data / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(
         json.dumps(

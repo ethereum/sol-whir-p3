@@ -5,8 +5,8 @@ import { Test } from "forge-std/Test.sol";
 import { KoalaBearExt5 as EF } from "../src/field/KoalaBearExt5.sol";
 import { LeanVmTranscript as Transcript } from "../src/leanvm/LeanVmTranscript.sol";
 import {
-    LeanVmTwoCommitmentTerminalVerifier as Terminal
-} from "../src/leanvm/LeanVmTwoCommitmentTerminalVerifier.sol";
+    LeanVmGroupedTerminalVerifier as Terminal
+} from "../src/leanvm/LeanVmGroupedTerminalVerifier.sol";
 import {
     LeanVmTwoCommitmentExecution as Execution
 } from "../src/leanvm/LeanVmTwoCommitmentExecution.sol";
@@ -45,6 +45,15 @@ contract LeanVmExecutionTwoCommitmentsHarness {
     ) external pure {
         Execution.validateFixedProgramPublicMemory(publicMemory, commitmentConfig, fixedClaims);
     }
+
+    function prefixedPoint(
+        uint256[] memory prefix,
+        uint256 start,
+        uint256 length,
+        uint256[] memory point
+    ) external pure returns (uint256[] memory) {
+        return Execution.prefixedPoint(prefix, start, length, point);
+    }
 }
 
 contract LeanVmExecutionTwoCommitmentsTest is Test {
@@ -55,20 +64,20 @@ contract LeanVmExecutionTwoCommitmentsTest is Test {
     }
 
     function testCompleteNativeStatementObservation() external view {
-        string memory directory = "testdata/leanvm_terminal/KeccakPublicMemoryC1Pow28T6/";
+        string memory directory = "testdata/leanvm_terminal/GroupedLogupKeccakPow28T6/";
         Terminal.Proof memory proof =
             abi.decode(vm.readFileBinary(string.concat(directory, "proof.abi")), (Terminal.Proof));
         Execution.FixedProgramClaims memory fixedClaims = Execution.FixedProgramClaims(
             proof.sparkPoint, proof.sparkValue, proof.liftPoint, proof.liftValue
         );
+        string memory manifest = vm.readFile(string.concat(directory, "manifest.json"));
         uint256[] memory expected = abi.decode(
-            vm.parseJson(
-                vm.readFile(string.concat(directory, "manifest.json")),
-                ".two_commitment_whir.statement_observation.fields"
-            ),
+            vm.parseJson(manifest, ".three_commitment_whir.statement_observation.fields"),
             (uint256[])
         );
-        assertEq(harness.observation(23, fixedClaims), expected);
+        uint256 variables =
+            vm.parseJsonUint(manifest, ".three_commitment_whir.primary.num_variables");
+        assertEq(harness.observation(variables, fixedClaims), expected);
     }
 
     function testObservationBindsEveryCoefficientAndRejectsNoncanonicalValues() external {
@@ -123,8 +132,11 @@ contract LeanVmExecutionTwoCommitmentsTest is Test {
         commitmentConfig.secondaryActualDataLength = 8;
         commitmentConfig.secondaryStatementPublicMemoryOffsets = [uint256(32), 8];
         commitmentConfig.secondaryStatementPointPrefixLengths = [uint256(1), 2];
-        commitmentConfig.secondaryStatementPointPrefixes = [uint256(0), uint256(1) << 224, 0];
-        commitmentConfig.executionBytecodePointPrefix = [uint256(1) << 224, uint256(1) << 224];
+        commitmentConfig.secondaryStatementPointPrefixes = new uint256[](3);
+        commitmentConfig.secondaryStatementPointPrefixes[1] = uint256(1) << 224;
+        commitmentConfig.executionBytecodePointPrefix = new uint256[](2);
+        commitmentConfig.executionBytecodePointPrefix[0] = uint256(1) << 224;
+        commitmentConfig.executionBytecodePointPrefix[1] = uint256(1) << 224;
     }
 
     function claims() private pure returns (Execution.FixedProgramClaims memory out) {
@@ -143,6 +155,152 @@ contract LeanVmExecutionTwoCommitmentsTest is Test {
             Execution.TwoCommitmentConfig memory commitmentConfig
         ) = config();
         harness.validate(executionConfig, commitmentConfig);
+    }
+
+    function paddedConfig(uint256 padding)
+        private
+        pure
+        returns (
+            Execution.Config memory executionConfig,
+            Execution.TwoCommitmentConfig memory commitmentConfig
+        )
+    {
+        (executionConfig, commitmentConfig) = config();
+        executionConfig.whir.variables += padding;
+        commitmentConfig.secondaryStatementPointPrefixLengths = [padding + 1, padding + 2];
+        commitmentConfig.secondaryStatementPointPrefixes = new uint256[](2 * padding + 3);
+        commitmentConfig.secondaryStatementPointPrefixes[2 * padding + 1] = uint256(1) << 224;
+        commitmentConfig.executionBytecodePointPrefix = new uint256[](padding + 2);
+        commitmentConfig.executionBytecodePointPrefix[padding] = uint256(1) << 224;
+        commitmentConfig.executionBytecodePointPrefix[padding + 1] = uint256(1) << 224;
+    }
+
+    function testZeroPaddingPreservesActualProgramLengthAndPrefixes() external view {
+        for (uint256 padding = 1; padding <= 3; ++padding) {
+            (
+                Execution.Config memory executionConfig,
+                Execution.TwoCommitmentConfig memory commitmentConfig
+            ) = paddedConfig(padding);
+            harness.validate(executionConfig, commitmentConfig);
+            assertEq(commitmentConfig.secondaryActualDataLength, 8);
+            Execution.FixedProgramClaims memory fixedClaims = claims();
+            uint256[] memory spark = harness.prefixedPoint(
+                commitmentConfig.secondaryStatementPointPrefixes,
+                0,
+                padding + 1,
+                fixedClaims.sparkPoint
+            );
+            uint256[] memory lift = harness.prefixedPoint(
+                commitmentConfig.secondaryStatementPointPrefixes,
+                padding + 1,
+                padding + 2,
+                fixedClaims.liftPoint
+            );
+            uint256[] memory root = harness.prefixedPoint(
+                commitmentConfig.executionBytecodePointPrefix, 0, padding + 2, fixedClaims.liftPoint
+            );
+            assertEq(spark.length, executionConfig.whir.variables);
+            assertEq(lift.length, executionConfig.whir.variables);
+            assertEq(root.length, executionConfig.whir.variables);
+            for (uint256 i; i < padding; ++i) {
+                assertEq(spark[i], 0);
+                assertEq(lift[i], 0);
+                assertEq(root[i], 0);
+            }
+            assertEq(spark[padding], 0);
+            assertEq(lift[padding], uint256(1) << 224);
+            assertEq(lift[padding + 1], 0);
+            assertEq(root[padding], uint256(1) << 224);
+            assertEq(root[padding + 1], uint256(1) << 224);
+            assertEq(spark[padding + 1], fixedClaims.sparkPoint[0]);
+            assertEq(lift[padding + 2], fixedClaims.liftPoint[0]);
+        }
+    }
+
+    function testRejectEveryIncorrectPaddedPrefixCoordinate() external {
+        (
+            Execution.Config memory executionConfig,
+            Execution.TwoCommitmentConfig memory commitmentConfig
+        ) = paddedConfig(2);
+        for (uint256 i; i < commitmentConfig.secondaryStatementPointPrefixes.length; ++i) {
+            commitmentConfig.secondaryStatementPointPrefixes[i] ^= uint256(1) << 224;
+            vm.expectRevert("TWO_COMMITMENT_MEMORY");
+            harness.validate(executionConfig, commitmentConfig);
+            commitmentConfig.secondaryStatementPointPrefixes[i] ^= uint256(1) << 224;
+        }
+        for (uint256 i; i < commitmentConfig.executionBytecodePointPrefix.length; ++i) {
+            commitmentConfig.executionBytecodePointPrefix[i] ^= uint256(1) << 224;
+            vm.expectRevert("TWO_COMMITMENT_MEMORY");
+            harness.validate(executionConfig, commitmentConfig);
+            commitmentConfig.executionBytecodePointPrefix[i] ^= uint256(1) << 224;
+        }
+        commitmentConfig.secondaryActualDataLength = uint256(1) << executionConfig.whir.variables;
+        vm.expectRevert("TWO_COMMITMENT_LENGTH");
+        harness.validate(executionConfig, commitmentConfig);
+    }
+
+    function testPaddedPointsEvaluateOriginalProgramPolynomials() external view {
+        Execution.FixedProgramClaims memory fixedClaims = claims();
+        uint256[] memory rootPoint = new uint256[](1);
+        rootPoint[0] = EF.fromBase(17);
+        for (uint256 padding; padding <= 2; ++padding) {
+            (
+                Execution.Config memory executionConfig,
+                Execution.TwoCommitmentConfig memory commitmentConfig
+            ) = paddedConfig(padding);
+            uint256[] memory padded = new uint256[](uint256(1) << executionConfig.whir.variables);
+            for (uint256 i; i < 8; ++i) {
+                padded[i] = EF.fromBase(i + 2);
+            }
+            for (uint256 program; program < 3; ++program) {
+                uint256 length = program == 0 ? 4 : 2;
+                uint256 start = program == 0 ? 0 : (program == 1 ? 4 : 6);
+                uint256[] memory original = new uint256[](length);
+                for (uint256 i; i < length; ++i) {
+                    original[i] = padded[start + i];
+                }
+                uint256[] memory point = program == 0
+                    ? fixedClaims.sparkPoint
+                    : (program == 1 ? fixedClaims.liftPoint : rootPoint);
+                uint256[] memory embedded = harness.prefixedPoint(
+                    program == 2
+                        ? commitmentConfig.executionBytecodePointPrefix
+                        : commitmentConfig.secondaryStatementPointPrefixes,
+                    program == 1 ? padding + 1 : 0,
+                    program == 0 ? padding + 1 : padding + 2,
+                    point
+                );
+                assertEq(
+                    EF.evaluate_hypercube(padded, embedded), EF.evaluate_hypercube(original, point)
+                );
+            }
+        }
+    }
+
+    function testPaddedStatementObservationBindsCompletePoints() external view {
+        Execution.FixedProgramClaims memory fixedClaims = claims();
+        uint256[] memory encoded = harness.observation(4, fixedClaims);
+        uint256[] memory expected = new uint256[](64);
+        expected[0] = 0x32574f31;
+        expected[1] = 2;
+        expected[2] = 64;
+        expected[4] = 4;
+        expected[5] = 4;
+        expected[6] = 1;
+        expected[18] = 11;
+        expected[23] = 12;
+        expected[29] = 13;
+        expected[34] = 4;
+        expected[35] = 4;
+        expected[36] = 1;
+        expected[43] = 1;
+        expected[53] = 14;
+        expected[59] = 15;
+        assertEq(encoded, expected);
+        assertNotEq(
+            harness.sampleAfterObservation(3, fixedClaims),
+            harness.sampleAfterObservation(4, fixedClaims)
+        );
     }
 
     function testRejectsWrongMode() external {

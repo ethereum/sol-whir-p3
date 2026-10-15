@@ -39,5 +39,10 @@
     "src/transcript/WhirTranscript.sol": "ae47f04134f2cb09a8babb646885e81fd5ba817bdb209e9ea96983c821359ed4",
     "foundry.toml": "e12e5602d8ef6da4e5d164ca56092f045faa90fc04b252921bbdc2ee94c49234"
   },
-  "verification_boundary": "Experimental complete LeanVM grouped LogUp terminal root, three Keccak WHIR commitments, authenticated public memory and fixed-program claims; full composition security remains under review"
+  "verification_boundary": "Experimental complete LeanVM grouped LogUp terminal root, three Keccak WHIR commitments, authenticated public memory and fixed-program claims; full composition security remains under review",
+  "verification_status": {
+    "status": "historical rejection fixtures",
+    "reason": "These proofs use earlier program commitments or a different terminal mode and must be rejected by the selected grouped verifier."
+  },
+  "historical_c1_proof_abi_sha256": "f433ec77e3e420296c8a90509b6da509d0636a29d7d0f723d2efdda90d7006f9"
 }
