@@ -4,7 +4,7 @@ Local-only A/B target for measuring generic KoalaBear ext5 / ext8 arithmetic pre
 
 The experiment does not change WHIR protocol parameters, the verifier external ABI, the proof blob format, transcript ordering, Merkle tree layout, calldata encoding, or the baseline native verifier source. The precompile-backed variants live in parallel directories (`src/whir/k22_jb100_lir6_ff4_rsv1_precompile_phase1/`, `src/whir/k22_jb100_ext5_lir4_ff4_rsv3_pow28_precompile/`).
 
-The custom node is an embedded Anvil launcher from the [Foundry fork](https://github.com/alxkzmn/foundry/tree/codex/ext8-precompile-runner), registering precompiles via `NodeConfig::with_precompile_factory(...)`.
+The custom node is an embedded Anvil launcher from the [Foundry fork](https://github.com/Client-Side-Proving/foundry/tree/codex/ext8-precompile-runner), registering precompiles via `NodeConfig::with_precompile_factory(...)`.
 
 ## Operational gotchas
 
@@ -115,7 +115,7 @@ Everything else (ext add/sub, ext-by-base, base-row STIR, singleton Horner MAC c
 | `testdata/extfield_mac_gas_schedule.json`, `testdata/extfield_lin_prod_gas_schedule.json`  | locked generic-primitive gas schedules                               |
 | `testdata/extfield_mac_*_vectors.json`, `testdata/extfield_lin_prod_*_vectors.json`        | deterministic differential vectors                                   |
 
-Foundry-fork sources for the precompile runners live under [alxkzmn/foundry](https://github.com/alxkzmn/foundry/tree/codex/ext8-precompile-runner):
+Foundry-fork sources for the precompile runners live under [Client-Side-Proving/foundry](https://github.com/Client-Side-Proving/foundry/tree/codex/ext8-precompile-runner):
 
 - `crates/ext8-precompile-runner/`, `crates/ext5-precompile-runner/`
 - `src/precompiles.rs` — dispatch, validation, arithmetic

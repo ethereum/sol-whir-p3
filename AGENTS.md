@@ -34,19 +34,19 @@ EVM verifier compatibility takes priority over Rust-only cleanliness. Reject cha
 
 Use these upstream locations as the logic sources when checking Solidity behavior:
 
-| Surface                            | Source                                                                                                                                                                                                                                                                                                             |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Surface                               | Source                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | WHIR verification inside Spartan-WHIR | [spartan-whir/src/whir_pcs.rs](https://github.com/ethereum/spartan-whir/blob/main/src/whir_pcs.rs), [whir-p3/src/whir/verifier/mod.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/verifier/mod.rs), and [whir-p3/src/whir/verifier/sumcheck.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/verifier/sumcheck.rs) |
-| Full Spartan IOP reference only     | [spartan-whir/src/protocol.rs](https://github.com/ethereum/spartan-whir/blob/main/src/protocol.rs) and [spartan-whir/src/sumcheck.rs](https://github.com/ethereum/spartan-whir/blob/main/src/sumcheck.rs). Use these for full-SNARK or Spartan IOP questions, not for standalone-WHIR Solidity gas work. |
-| KoalaBear field arithmetic         | [Plonky3/koala-bear/src/koala_bear.rs](https://github.com/Plonky3/Plonky3/blob/main/koala-bear/src/koala_bear.rs)                                                                                                                                                                                                  |
-| BabyBear field arithmetic          | [Plonky3/baby-bear/src/baby_bear.rs](https://github.com/Plonky3/Plonky3/blob/main/baby-bear/src/baby_bear.rs)                                                                                                                                                                                                  |
-| Extension-field arithmetic         | [Plonky3/field/src/extension/binomial_extension.rs](https://github.com/Plonky3/Plonky3/blob/main/field/src/extension/binomial_extension.rs)                                                                                                                                                                        |
-| Hashing                            | [spartan-whir/src/hashers.rs](https://github.com/ethereum/spartan-whir/blob/main/src/hashers.rs)                                                                                                                                                                                                                   |
-| Merkle multiproof                  | [whir-p3/src/whir/merkle_multiproof.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/merkle_multiproof.rs)                                                                                                                                                                                                 |
-| Proof types                        | [whir-p3/src/whir/proof.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/proof.rs)                                                                                                                                                                                                                         |
-| Config derivation                  | [whir-p3/src/whir/parameters.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/parameters.rs)                                                                                                                                                                                                               |
-| Domain separator                   | [spartan-whir/src/domain_separator.rs](https://github.com/ethereum/spartan-whir/blob/main/src/domain_separator.rs) and [whir-p3/src/fiat_shamir/domain_separator.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/fiat_shamir/domain_separator.rs)                                                              |
-| Structural Solidity reference only | [privacy-ethereum/sol-whir](https://github.com/privacy-ethereum/sol-whir) for project layout, gas harness, Merkle queue pattern, and test patterns. Do not use it as a logic source.                                                                                                                               |
+| Full Spartan IOP reference only       | [spartan-whir/src/protocol.rs](https://github.com/ethereum/spartan-whir/blob/main/src/protocol.rs) and [spartan-whir/src/sumcheck.rs](https://github.com/ethereum/spartan-whir/blob/main/src/sumcheck.rs). Use these for full-SNARK or Spartan IOP questions, not for standalone-WHIR Solidity gas work.                             |
+| KoalaBear field arithmetic            | [Plonky3/koala-bear/src/koala_bear.rs](https://github.com/Plonky3/Plonky3/blob/main/koala-bear/src/koala_bear.rs)                                                                                                                                                                                                                    |
+| BabyBear field arithmetic             | [Plonky3/baby-bear/src/baby_bear.rs](https://github.com/Plonky3/Plonky3/blob/main/baby-bear/src/baby_bear.rs)                                                                                                                                                                                                                        |
+| Extension-field arithmetic            | [Plonky3/field/src/extension/binomial_extension.rs](https://github.com/Plonky3/Plonky3/blob/main/field/src/extension/binomial_extension.rs)                                                                                                                                                                                          |
+| Hashing                               | [spartan-whir/src/hashers.rs](https://github.com/ethereum/spartan-whir/blob/main/src/hashers.rs)                                                                                                                                                                                                                                     |
+| Merkle multiproof                     | [whir-p3/src/whir/merkle_multiproof.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/merkle_multiproof.rs)                                                                                                                                                                                                                   |
+| Proof types                           | [whir-p3/src/whir/proof.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/proof.rs)                                                                                                                                                                                                                                           |
+| Config derivation                     | [whir-p3/src/whir/parameters.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/whir/parameters.rs)                                                                                                                                                                                                                                 |
+| Domain separator                      | [spartan-whir/src/domain_separator.rs](https://github.com/ethereum/spartan-whir/blob/main/src/domain_separator.rs) and [whir-p3/src/fiat_shamir/domain_separator.rs](https://github.com/alxkzmn/whir-p3/blob/csp/src/fiat_shamir/domain_separator.rs)                                                                                |
+| Structural Solidity reference only    | [privacy-ethereum/sol-whir](https://github.com/privacy-ethereum/sol-whir) for project layout, gas harness, Merkle queue pattern, and test patterns. Do not use it as a logic source.                                                                                                                                                 |
 
 ## Extension Degree and Folding Schedule
 
@@ -67,7 +67,7 @@ forge build
 forge test --offline --isolate --threads 1
 ```
 
-Regenerate the generic fixture set from the companion exporter in release mode. Set `SPARTAN_WHIR_EXPORT_DIR` to a checkout of [spartan-whir-export](https://github.com/alxkzmn/spartan-whir-export):
+Regenerate the generic fixture set from the companion exporter in release mode. Set `SPARTAN_WHIR_EXPORT_DIR` to a checkout of [spartan-whir-export](https://github.com/Client-Side-Proving/spartan-whir-export):
 
 ```sh
 cargo run --release --manifest-path "$SPARTAN_WHIR_EXPORT_DIR/Cargo.toml" --bin export-fixtures -- testdata
@@ -146,7 +146,7 @@ This caveat is temporary. If agent-side `forge script` runs stop showing tool-co
 
 ## Fixture and Schedule Commands
 
-Use release mode for exporter runs unless deliberately debugging the exporter. Set `SPARTAN_WHIR_EXPORT_DIR` to a checkout of [spartan-whir-export](https://github.com/alxkzmn/spartan-whir-export).
+Use release mode for exporter runs unless deliberately debugging the exporter. Set `SPARTAN_WHIR_EXPORT_DIR` to a checkout of [spartan-whir-export](https://github.com/Client-Side-Proving/spartan-whir-export).
 
 Current quintic fixture export:
 
@@ -223,7 +223,7 @@ bash .agents/skills/tx-gas-benchmarking/scripts/run_tx_gas_benchmark.sh script/W
 bash .agents/skills/tx-gas-benchmarking/scripts/run_tx_gas_benchmark.sh script/WhirBlobNativeTxBenchmark_k22_jb100_ext5_lir4_ff4_rsv3_pow28_precompile.s.sol
 ```
 
-Precompile runner and RPC measurement commands live here because they depend on the custom [Foundry fork](https://github.com/alxkzmn/foundry/tree/codex/ext8-precompile-runner). Set `FOUNDRY_FORK_DIR` to that checkout and `SOL_SPARTAN_WHIR_DIR` to this repository checkout.
+Precompile runner and RPC measurement commands live here because they depend on the custom [Foundry fork](https://github.com/Client-Side-Proving/foundry/tree/codex/ext8-precompile-runner). Set `FOUNDRY_FORK_DIR` to that checkout and `SOL_SPARTAN_WHIR_DIR` to this repository checkout.
 
 ```sh
 forge build
