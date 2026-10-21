@@ -257,35 +257,35 @@ library KoalaBearExt5 {
         return out;
     }
 
+    /// @dev Split the reversed transport polynomial into even/odd radix-2^64 lanes.
+    /// If r = p-1, even/odd convolution lanes are <= 3*r^2 < 2^64.
+    /// Direct mixed products have lanes <= 2*r^2; their sum has lanes
+    /// <= 4*r^2 < 2^64, with no carries. Both have degree at most three
+    /// in radix 2^64, so the cross result is also < 2^256.
+    /// The omitted degree-four even product is a0*b0, computed separately.
+    /// All reduced numerators are nonnegative and < 2^68 after the p*2^35 bias.
     function _mulPacked(uint256 a, uint256 b) private pure returns (uint256 out) {
         assembly ("memory-safe") {
             let M := 0x7f000001
-            let mask := 0xffffffff
-
-            let a0 := shr(224, a)
-            let a1 := and(shr(192, a), mask)
-            let a2 := and(shr(160, a), mask)
-            let a3 := and(shr(128, a), mask)
-            let a4 := and(shr(96, a), mask)
-
-            let b0 := shr(224, b)
-            let b1 := and(shr(192, b), mask)
-            let b2 := and(shr(160, b), mask)
-            let b3 := and(shr(128, b), mask)
-            let b4 := and(shr(96, b), mask)
-
-            let c0 := mul(a0, b0)
-            let c1 := add(mul(a0, b1), mul(a1, b0))
-            let c2 := add(add(mul(a0, b2), mul(a1, b1)), mul(a2, b0))
-            let c3 := add(add(add(mul(a0, b3), mul(a1, b2)), mul(a2, b1)), mul(a3, b0))
-            let c4 :=
-                add(add(add(add(mul(a0, b4), mul(a1, b3)), mul(a2, b2)), mul(a3, b1)), mul(a4, b0))
-            let c5 := add(add(add(mul(a1, b4), mul(a2, b3)), mul(a3, b2)), mul(a4, b1))
-            let c6 := add(add(mul(a2, b4), mul(a3, b3)), mul(a4, b2))
-            let c7 := add(mul(a3, b4), mul(a4, b3))
-            let c8 := mul(a4, b4)
+            let mask := 0xffffffff00000000ffffffff00000000ffffffff
+            let ae := and(shr(96, a), mask)
+            let ao := and(shr(128, a), mask)
+            let be := and(shr(96, b), mask)
+            let bo := and(shr(128, b), mask)
+            let even := mul(ae, be)
+            let odd := mul(ao, bo)
+            let cross := add(mul(ae, bo), mul(ao, be))
+            let c0 := mul(shr(224, a), shr(224, b))
+            let laneMask := 0xffffffffffffffff
+            let c1 := shr(192, cross)
+            let c2 := add(shr(192, even), shr(128, odd))
+            let c3 := and(shr(128, cross), laneMask)
+            let c4 := add(and(shr(128, even), laneMask), and(shr(64, odd), laneMask))
+            let c5 := and(shr(64, cross), laneMask)
+            let c6 := add(and(shr(64, even), laneMask), and(odd, laneMask))
+            let c7 := and(cross, laneMask)
+            let c8 := and(even, laneMask)
             let bias := shl(35, M)
-
             out := or(
                 or(
                     or(
@@ -302,44 +302,29 @@ library KoalaBearExt5 {
         }
     }
 
+    /// @dev The same even/odd split, with cross = 2*even*odd by symmetry.
+    /// Each lane before doubling is <= 2*(p-1)^2 < 2^63, so doubling cannot
+    /// carry between lanes or overflow the retained 256-bit cross polynomial.
     function _squarePacked(uint256 a) private pure returns (uint256 out) {
         assembly ("memory-safe") {
             let M := 0x7f000001
-            let mask := 0xffffffff
-
-            let a0 := shr(224, a)
-            let a1 := and(shr(192, a), mask)
-            let a2 := and(shr(160, a), mask)
-            let a3 := and(shr(128, a), mask)
-            let a4 := and(shr(96, a), mask)
-
-            let a0a0 := mul(a0, a0)
-            let a0a1 := mul(a0, a1)
-            let a0a2 := mul(a0, a2)
-            let a0a3 := mul(a0, a3)
-            let a0a4 := mul(a0, a4)
-            let a1a1 := mul(a1, a1)
-            let a1a2 := mul(a1, a2)
-            let a1a3 := mul(a1, a3)
-            let a1a4 := mul(a1, a4)
-            let a2a2 := mul(a2, a2)
-            let a2a3 := mul(a2, a3)
-            let a2a4 := mul(a2, a4)
-            let a3a3 := mul(a3, a3)
-            let a3a4 := mul(a3, a4)
-            let a4a4 := mul(a4, a4)
-
-            let c0 := a0a0
-            let c1 := shl(1, a0a1)
-            let c2 := add(shl(1, a0a2), a1a1)
-            let c3 := add(shl(1, a0a3), shl(1, a1a2))
-            let c4 := add(add(shl(1, a0a4), shl(1, a1a3)), a2a2)
-            let c5 := add(shl(1, a1a4), shl(1, a2a3))
-            let c6 := add(shl(1, a2a4), a3a3)
-            let c7 := shl(1, a3a4)
-            let c8 := a4a4
+            let mask := 0xffffffff00000000ffffffff00000000ffffffff
+            let ae := and(shr(96, a), mask)
+            let ao := and(shr(128, a), mask)
+            let even := mul(ae, ae)
+            let odd := mul(ao, ao)
+            let cross := shl(1, mul(ae, ao))
+            let c0 := mul(shr(224, a), shr(224, a))
+            let laneMask := 0xffffffffffffffff
+            let c1 := shr(192, cross)
+            let c2 := add(shr(192, even), shr(128, odd))
+            let c3 := and(shr(128, cross), laneMask)
+            let c4 := add(and(shr(128, even), laneMask), and(shr(64, odd), laneMask))
+            let c5 := and(shr(64, cross), laneMask)
+            let c6 := add(and(shr(64, even), laneMask), and(odd, laneMask))
+            let c7 := and(cross, laneMask)
+            let c8 := and(even, laneMask)
             let bias := shl(35, M)
-
             out := or(
                 or(
                     or(
@@ -361,80 +346,16 @@ library KoalaBearExt5 {
         pure
         returns (uint256)
     {
-        uint256 q1Packed;
-        uint256 q2Packed;
-
+        uint256 delta = sub(e1, e0);
+        uint256 q2Packed = sub(sub(e2, e1), delta);
         assembly ("memory-safe") {
-            let M := 0x7f000001
-            let mask := 0xffffffff
-            let invTwo := 1065353217
-            let twoM := 0xfe000002
-            let fourM := 0x1fc000004
-
-            let c0 := shr(224, e0)
-            let c1 := shr(224, e1)
-            let c2 := shr(224, e2)
-
-            q2Packed := shl(224, mulmod(sub(add(add(c0, c2), twoM), add(c1, c1)), invTwo, M))
-            q1Packed := shl(
-                224,
-                mulmod(sub(add(shl(2, c1), fourM), add(c2, mul(c0, 3))), invTwo, M)
-            )
-
-            c0 := and(shr(192, e0), mask)
-            c1 := and(shr(192, e1), mask)
-            c2 := and(shr(192, e2), mask)
-
-            q2Packed := or(
-                q2Packed,
-                shl(192, mulmod(sub(add(add(c0, c2), twoM), add(c1, c1)), invTwo, M))
-            )
-            q1Packed := or(
-                q1Packed,
-                shl(192, mulmod(sub(add(shl(2, c1), fourM), add(c2, mul(c0, 3))), invTwo, M))
-            )
-
-            c0 := and(shr(160, e0), mask)
-            c1 := and(shr(160, e1), mask)
-            c2 := and(shr(160, e2), mask)
-
-            q2Packed := or(
-                q2Packed,
-                shl(160, mulmod(sub(add(add(c0, c2), twoM), add(c1, c1)), invTwo, M))
-            )
-            q1Packed := or(
-                q1Packed,
-                shl(160, mulmod(sub(add(shl(2, c1), fourM), add(c2, mul(c0, 3))), invTwo, M))
-            )
-
-            c0 := and(shr(128, e0), mask)
-            c1 := and(shr(128, e1), mask)
-            c2 := and(shr(128, e2), mask)
-
-            q2Packed := or(
-                q2Packed,
-                shl(128, mulmod(sub(add(add(c0, c2), twoM), add(c1, c1)), invTwo, M))
-            )
-            q1Packed := or(
-                q1Packed,
-                shl(128, mulmod(sub(add(shl(2, c1), fourM), add(c2, mul(c0, 3))), invTwo, M))
-            )
-
-            c0 := and(shr(96, e0), mask)
-            c1 := and(shr(96, e1), mask)
-            c2 := and(shr(96, e2), mask)
-
-            q2Packed := or(
-                q2Packed,
-                shl(96, mulmod(sub(add(add(c0, c2), twoM), add(c1, c1)), invTwo, M))
-            )
-            q1Packed := or(
-                q1Packed,
-                shl(96, mulmod(sub(add(shl(2, c1), fourM), add(c2, mul(c0, 3))), invTwo, M))
-            )
+            // Canonical x is halved by (x + (x & 1) * p) / 2.
+            // Each even numerator is below 2p < 2^32, so lanes do not carry.
+            let odd :=
+                and(q2Packed, 0x0000000100000001000000010000000100000001000000000000000000000000)
+            q2Packed := shr(1, add(q2Packed, mul(odd, 0x7f000001)))
         }
-
-        return add(e0, mul(r, add(q1Packed, mul(r, q2Packed))));
+        return add(e0, mul(r, add(sub(delta, q2Packed), mul(r, q2Packed))));
     }
 
     function _mulCoeffs(uint256[5] memory a, uint256[5] memory b)

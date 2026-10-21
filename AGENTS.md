@@ -262,6 +262,24 @@ python3 script/run_ext5_precompile_full_verifier_rpc.py --rpc-url http://127.0.0
 3. Run `forge test --match-test testProfileFullBreakdown -vv` — verify phase-level breakdown
 4. Compare against previous numbers to confirm the delta matches expectations
 
+### Quintic validation
+
+Run the [complete Solidity suite](README.md#build-and-test) and the focused checks below. The [dense proof corpus](testdata/quintic_valid_proofs/) covers native and typed acceptance, proof encodings, Rust transcript replay, general extension rows, and rejection of altered roots, fields, siblings and lengths. The structured fixture covers repeated coefficient columns.
+
+```sh
+forge test --offline --isolate --threads 1 --evm-version prague \
+  --code-size-limit 1048576 --match-path test/QuinticValidProofCorpus.t.sol
+forge test --offline --isolate --threads 1 --evm-version prague \
+  --code-size-limit 1048576 --match-path test/QuinticTransport.t.sol
+forge test --offline --isolate --threads 1 --evm-version prague \
+  --code-size-limit 1048576 --match-path test/MerkleDepthFirstTransport.t.sol
+python3 -m unittest discover -s script -p test_quintic_transport.py -v
+```
+
+The 1,048,576-byte allowance accommodates test contracts. `script/generate_quintic_transport_vectors.py` regenerates codec vectors and corpus encodings; Python tests require byte-for-byte agreement with the retained files. The [test-data README](testdata/README.md#runtime-fixtures) records the dense proof generator and seeds.
+
+The `quintic_gas` profile uses 1,000,000 optimizer runs; the default profile uses 833. Compare measurements with matching compiler, profile, EVM target and proof input. Regenerate calibration from current sources using the [fixture and schedule commands](#fixture-and-schedule-commands) before using schedule scores.
+
 ## Gas Optimization Workflow
 
 Use this workflow to decide which verifier-only optimizations are worth attempting under `via_ir`, and how to reject weak candidates quickly.

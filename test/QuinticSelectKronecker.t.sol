@@ -163,15 +163,27 @@ contract QuinticSelectKroneckerTest is Test {
         }
     }
 
-    function _packForms(uint256 low, uint256 rev) private pure returns (uint256 out) {
+    function _packForms(uint256 even, uint256 odd) private pure returns (uint256 out) {
         assembly ("memory-safe") {
-            out := or(
-                or(
-                    or(shl(224, and(low, 0xffffffff)), shl(192, and(shr(64, low), 0xffffffff))),
-                    or(shl(160, and(shr(128, low), 0xffffffff)), shl(128, shr(192, low)))
-                ),
-                shl(96, and(rev, 0xffffffff))
-            )
+            out := or(shl(96, even), shl(128, odd))
+        }
+    }
+
+    function testEqFormsEveryBasisPair() external pure {
+        uint256[4] memory cache;
+        for (uint256 i; i < 5; ++i) {
+            for (uint256 j; j < 5; ++j) {
+                uint256 a = uint256(1) << (224 - 32 * i);
+                uint256 b = uint256(1) << (224 - 32 * j);
+                WhirVerifierCore5._prepareEqTermForms(b, cache);
+                (uint256 even, uint256 odd) = WhirVerifierCore5._eqTermForms(a, cache);
+                assertEq(_packForms(even, odd), WhirVerifierCore5._eqTerm(a, b));
+                a *= P - 1;
+                b *= P - 1;
+                WhirVerifierCore5._prepareEqTermForms(b, cache);
+                (even, odd) = WhirVerifierCore5._eqTermForms(a, cache);
+                assertEq(_packForms(even, odd), WhirVerifierCore5._eqTerm(a, b));
+            }
         }
     }
 

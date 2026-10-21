@@ -11,7 +11,7 @@ lib/
 
 broadcast/
 
-# CI-regenerable benchmark and compiler evidence. Keep compact manifests and
+# CI-regenerable benchmark and compiler evidence. Keep measurement records and
 # runtime fixtures checked in.
 testdata/**/*_compiler_snapshot*/
 testdata/**/*_tx_snapshot*/
@@ -22,6 +22,14 @@ testdata/**/*.yul
 testdata/**/*.hex
 testdata/**/*.ir
 testdata/**/*.txt
+
+# Optional generated fixture inventories.
+/testdata/quintic_valid_proofs/manifest.json
+/testdata/quintic_valid_proofs/seed-*/seeded_fixture_manifest.json
+/testdata/transport/manifest.json
+
+# Local verifier benchmark report.
+/testdata/quintic_verifier_measurements.json
 
 # BabyBear experiment sources and reproduction scripts are retained; their
 # generated workspaces and result payloads are CI artifacts.

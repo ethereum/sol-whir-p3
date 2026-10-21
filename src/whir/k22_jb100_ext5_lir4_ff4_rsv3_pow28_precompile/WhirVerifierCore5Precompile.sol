@@ -587,14 +587,6 @@ library WhirVerifierCore5Precompile {
             p2 := mload(add(pointBase, 0x40))
             p3 := mload(add(pointBase, 0x60))
         }
-        (uint256 r00, uint256 r01, uint256 r02, uint256 r03, uint256 r04) =
-            WhirVerifierUtils5._unpackCoeffs(p0);
-        (uint256 r10, uint256 r11, uint256 r12, uint256 r13, uint256 r14) =
-            WhirVerifierUtils5._unpackCoeffs(p1);
-        (uint256 r20, uint256 r21, uint256 r22, uint256 r23, uint256 r24) =
-            WhirVerifierUtils5._unpackCoeffs(p2);
-        (uint256 r30, uint256 r31, uint256 r32, uint256 r33, uint256 r34) =
-            WhirVerifierUtils5._unpackCoeffs(p3);
         challenge = WhirVerifierUtils5.sampleExt5(challenger);
         selVars = indices;
 
@@ -613,7 +605,9 @@ library WhirVerifierCore5Precompile {
             }
 
             if (expectedKind == 0) {
-                uint256 eqWeightsPtr = _computeDim4EqWeightsPrecompile(p0, p1, p2, p3);
+                uint256 eqWeightsPtr = WhirVerifierUtils5._prepareBaseRadix64(
+                    _computeDim4EqWeightsPrecompile(p0, p1, p2, p3)
+                );
                 rowOffset = valuesOffset + numQueries * 64;
                 uint256 nextHigher;
                 for (uint256 i = numQueries; i > 0; --i) {
@@ -625,30 +619,8 @@ library WhirVerifierCore5Precompile {
                     nextHigher = idx;
                     rowOffset -= 64;
 
-                    (bytes32 hash, uint256 evalValue) = WhirVerifierUtils5._hashAndEvaluateBaseRowDim4BlobUnpacked(
-                        blob,
-                        rowOffset,
-                        eqWeightsPtr,
-                        r00,
-                        r01,
-                        r02,
-                        r03,
-                        r04,
-                        r10,
-                        r11,
-                        r12,
-                        r13,
-                        r14,
-                        r20,
-                        r21,
-                        r22,
-                        r23,
-                        r24,
-                        r30,
-                        r31,
-                        r32,
-                        r33,
-                        r34
+                    (bytes32 hash, uint256 evalValue) = WhirVerifierUtils5._hashAndEvaluateBaseRow16Blob(
+                        blob, rowOffset, eqWeightsPtr
                     );
                     claimedContribution = _hornerStep(claimedContribution, challenge, evalValue);
 
