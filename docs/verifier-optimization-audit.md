@@ -1,5 +1,7 @@
 # Verifier optimization audit
 
+This is a historical record of the 833-run optimization campaign. The [README](../README.md#latest-measurements) lists the current verifier measurements.
+
 This audit covers the production native blob verifiers for the KoalaBear and BabyBear quintic schedules and the KoalaBear octic schedule. All acceptance measurements use the complete schedule-specific native verifier, Solidity 0.8.28, `via_ir`, 833 optimizer runs, and the Prague EVM target. A candidate is retained only when it reduces the current round's complete verifier gas by strictly more than 1%.
 
 ## Production measurements

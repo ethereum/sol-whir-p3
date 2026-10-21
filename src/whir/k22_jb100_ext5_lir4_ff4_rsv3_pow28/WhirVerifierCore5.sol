@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+
+import { QuinticTransportCodec } from "./QuinticTransportCodec.sol";
 import { KoalaBearPackedField } from "../../field/KoalaBearPackedField.sol";
 
 import { KoalaBear } from "../../field/KoalaBear.sol";
@@ -140,7 +142,7 @@ library WhirVerifierCore5 {
         }
     }
 
-    function _fillSelVarsPow(uint256[] memory selVars, uint256 base, uint256 count) private pure {
+    function _fillSelVarsPow(uint256[] memory selVars, uint256 base, uint256 count) internal pure {
         uint256 freePtr;
         assembly ("memory-safe") {
             freePtr := mload(0x40)
@@ -177,14 +179,44 @@ library WhirVerifierCore5 {
                 valuePtr := add(valuePtr, 0x20)
             } {
                 let exponent := mload(valuePtr)
-                let result := 1
-                for { let windowPtr := tableStart } lt(windowPtr, tableEnd) {
-                    windowPtr := add(windowPtr, 0x40)
-                } {
-                    let digit := and(exponent, 0x0f)
-                    let power := shr(224, mload(add(windowPtr, shl(2, digit))))
-                    result := mulmod(result, power, modulus)
-                    exponent := shr(4, exponent)
+                // Every fixed-base table has five or six nibble windows. The first
+                // multiplication by one and the per-window loop machinery are unnecessary.
+                let result := shr(224, mload(add(tableStart, shl(2, and(exponent, 0x0f)))))
+                result := mulmod(
+                    result,
+                    shr(224, mload(add(add(tableStart, 64), shl(2, and(shr(4, exponent), 0x0f))))),
+                    modulus
+                )
+                result := mulmod(
+                    result,
+                    shr(224, mload(add(add(tableStart, 128), shl(2, and(shr(8, exponent), 0x0f))))),
+                    modulus
+                )
+                result := mulmod(
+                    result,
+                    shr(
+                        224,
+                        mload(add(add(tableStart, 192), shl(2, and(shr(12, exponent), 0x0f))))
+                    ),
+                    modulus
+                )
+                result := mulmod(
+                    result,
+                    shr(
+                        224,
+                        mload(add(add(tableStart, 256), shl(2, and(shr(16, exponent), 0x0f))))
+                    ),
+                    modulus
+                )
+                if eq(sub(tableEnd, tableStart), 384) {
+                    result := mulmod(
+                        result,
+                        shr(
+                            224,
+                            mload(add(add(tableStart, 320), shl(2, and(shr(20, exponent), 0x0f))))
+                        ),
+                        modulus
+                    )
                 }
                 mstore(valuePtr, result)
             }
@@ -202,7 +234,8 @@ library WhirVerifierCore5 {
         uint256 p0,
         uint256 p1,
         uint256 p2,
-        uint256 p3
+        uint256 p3,
+        uint256[] memory compactOffsets
     ) private pure returns (bytes32 root, uint256[] memory rowEvals) {
         uint256 count = indices.length;
         if (count == 0) {
@@ -218,14 +251,6 @@ library WhirVerifierCore5 {
             mstore(0x40, add(add(rowEvals, 0x20), shl(5, count)))
         }
 
-        (uint256 r00, uint256 r01, uint256 r02, uint256 r03, uint256 r04) =
-            WhirVerifierUtils5._unpackCoeffs(p0);
-        (uint256 r10, uint256 r11, uint256 r12, uint256 r13, uint256 r14) =
-            WhirVerifierUtils5._unpackCoeffs(p1);
-        (uint256 r20, uint256 r21, uint256 r22, uint256 r23, uint256 r24) =
-            WhirVerifierUtils5._unpackCoeffs(p2);
-        (uint256 r30, uint256 r31, uint256 r32, uint256 r33, uint256 r34) =
-            WhirVerifierUtils5._unpackCoeffs(p3);
         uint256 eqWeightsPtr = WhirVerifierUtils5._computeDim4EqWeightsUnpacked(p0, p1, p2, p3);
 
         unchecked {
@@ -238,31 +263,17 @@ library WhirVerifierCore5 {
                 prevIdx = idx;
 
                 uint256 rowOffset = valuesOffset + i * 320;
-                (bytes32 hash, uint256 evalValue) = WhirVerifierUtils5._hashAndEvaluateExtension5RowDim4BlobUnpacked(
-                    blob,
-                    rowOffset,
-                    eqWeightsPtr,
-                    r00,
-                    r01,
-                    r02,
-                    r03,
-                    r04,
-                    r10,
-                    r11,
-                    r12,
-                    r13,
-                    r14,
-                    r20,
-                    r21,
-                    r22,
-                    r23,
-                    r24,
-                    r30,
-                    r31,
-                    r32,
-                    r33,
-                    r34
-                );
+                bytes32 hash;
+                uint256 evalValue;
+                if (compactOffsets.length != 0) {
+                    (hash, evalValue) = WhirVerifierUtils5._hashAndEvaluateCompactRow16(
+                        blob, compactOffsets[i], eqWeightsPtr
+                    );
+                } else {
+                    (hash, evalValue) = WhirVerifierUtils5._hashAndEvaluateExtensionRow16Blob(
+                        blob, rowOffset, eqWeightsPtr
+                    );
+                }
                 rowEvals[i] = evalValue;
 
                 assembly ("memory-safe") {
@@ -271,7 +282,7 @@ library WhirVerifierCore5 {
             }
         }
 
-        root = MerkleVerifier.computeRootFromPackedFrontier20Blob(
+        root = MerkleVerifier.computeRootFromPackedFrontier20BlobTransport(
             frontierEntries, count, depth, blob, decommOffset, decommLen
         );
     }
@@ -394,8 +405,10 @@ library WhirVerifierCore5 {
         uint256[] memory allRandomness,
         uint256 randomnessOffset,
         uint256 finalPolyOffset,
-        uint256 finalPolyLength
-    ) private pure {
+        uint256 finalPolyLength,
+        uint256[] memory compactOffsets,
+        bytes memory finalPolyMemory
+    ) private pure returns (uint256 packedFinalPtr) {
         uint256 pointBase;
         assembly ("memory-safe") {
             pointBase := add(add(allRandomness, 0x20), shl(5, randomnessOffset))
@@ -414,7 +427,17 @@ library WhirVerifierCore5 {
         bytes32 computedRoot;
         uint256[] memory rowEvals;
         (computedRoot, rowEvals) = _computeExtension5RootAndEvalsBlob16(
-            indices, blob, valuesOffset, depth, decommOffset, decommLen, p0, p1, p2, p3
+            indices,
+            blob,
+            valuesOffset,
+            depth,
+            decommOffset,
+            decommLen,
+            p0,
+            p1,
+            p2,
+            p3,
+            compactOffsets
         );
 
         if (computedRoot != expectedRoot) {
@@ -423,8 +446,9 @@ library WhirVerifierCore5 {
 
         unchecked {
             if (finalPolyLength == 64 && numQueries == 14) {
-                uint256 packedFinalPtr =
-                    WhirVerifierUtils5._prepareHornerRadix64(blob, finalPolyOffset);
+                packedFinalPtr = finalPolyMemory.length == 0
+                    ? WhirVerifierUtils5._prepareHornerRadix64(blob, finalPolyOffset)
+                    : WhirVerifierUtils5._prepareHornerRadix64Memory(finalPolyMemory);
                 _fillSelVarsPow(indices, foldedDomainGen, numQueries);
                 uint256 point0;
                 uint256 point1;
@@ -473,7 +497,7 @@ library WhirVerifierCore5 {
                         revert StirConstraintFailed(i);
                     }
                 }
-                return;
+                return packedFinalPtr;
             }
 
             for (uint256 i = 0; i < numQueries; ++i) {
@@ -502,7 +526,8 @@ library WhirVerifierCore5 {
         uint256[] memory allRandomness,
         uint256 randomnessOffset,
         uint8 expectedKind,
-        uint256 oodAnswer
+        uint256 oodAnswer,
+        uint256[] memory compactOffsets
     )
         private
         pure
@@ -522,14 +547,6 @@ library WhirVerifierCore5 {
             p2 := mload(add(pointBase, 0x40))
             p3 := mload(add(pointBase, 0x60))
         }
-        (uint256 r00, uint256 r01, uint256 r02, uint256 r03, uint256 r04) =
-            WhirVerifierUtils5._unpackCoeffs(p0);
-        (uint256 r10, uint256 r11, uint256 r12, uint256 r13, uint256 r14) =
-            WhirVerifierUtils5._unpackCoeffs(p1);
-        (uint256 r20, uint256 r21, uint256 r22, uint256 r23, uint256 r24) =
-            WhirVerifierUtils5._unpackCoeffs(p2);
-        (uint256 r30, uint256 r31, uint256 r32, uint256 r33, uint256 r34) =
-            WhirVerifierUtils5._unpackCoeffs(p3);
         challenge = WhirVerifierUtils5.sampleExt5(challenger);
         selVars = indices;
 
@@ -548,7 +565,7 @@ library WhirVerifierCore5 {
             }
 
             if (expectedKind == 0) {
-                uint256 eqWeightsPtr = WhirVerifierUtils5._prepareBaseRadix80(
+                uint256 eqWeightsPtr = WhirVerifierUtils5._prepareBaseRadix64(
                     WhirVerifierUtils5._computeDim4EqWeights(p0, p1, p2, p3)
                 );
                 rowOffset = valuesOffset + numQueries * 64;
@@ -562,30 +579,8 @@ library WhirVerifierCore5 {
                     nextHigher = idx;
                     rowOffset -= 64;
 
-                    (bytes32 hash, uint256 evalValue) = WhirVerifierUtils5._hashAndEvaluateBaseRowDim4BlobUnpacked(
-                        blob,
-                        rowOffset,
-                        eqWeightsPtr,
-                        r00,
-                        r01,
-                        r02,
-                        r03,
-                        r04,
-                        r10,
-                        r11,
-                        r12,
-                        r13,
-                        r14,
-                        r20,
-                        r21,
-                        r22,
-                        r23,
-                        r24,
-                        r30,
-                        r31,
-                        r32,
-                        r33,
-                        r34
+                    (bytes32 hash, uint256 evalValue) = WhirVerifierUtils5._hashAndEvaluateBaseRow16Blob(
+                        blob, rowOffset, eqWeightsPtr
                     );
                     claimedContribution = _hornerStep(claimedContribution, challenge, evalValue);
 
@@ -608,31 +603,17 @@ library WhirVerifierCore5 {
                     nextHigher = idx;
                     rowOffset -= 320;
 
-                    (bytes32 hash, uint256 evalValue) = WhirVerifierUtils5._hashAndEvaluateExtension5RowDim4BlobUnpacked(
-                        blob,
-                        rowOffset,
-                        eqWeightsPtr,
-                        r00,
-                        r01,
-                        r02,
-                        r03,
-                        r04,
-                        r10,
-                        r11,
-                        r12,
-                        r13,
-                        r14,
-                        r20,
-                        r21,
-                        r22,
-                        r23,
-                        r24,
-                        r30,
-                        r31,
-                        r32,
-                        r33,
-                        r34
-                    );
+                    bytes32 hash;
+                    uint256 evalValue;
+                    if (compactOffsets.length != 0) {
+                        (hash, evalValue) = WhirVerifierUtils5._hashAndEvaluateCompactRow16(
+                            blob, compactOffsets[pos], eqWeightsPtr
+                        );
+                    } else {
+                        (hash, evalValue) = WhirVerifierUtils5._hashAndEvaluateExtensionRow16Blob(
+                            blob, rowOffset, eqWeightsPtr
+                        );
+                    }
                     claimedContribution = _hornerStep(claimedContribution, challenge, evalValue);
 
                     assembly ("memory-safe") {
@@ -643,7 +624,7 @@ library WhirVerifierCore5 {
             }
         }
 
-        bytes32 computedRoot = MerkleVerifier.computeRootFromPackedFrontier20Blob(
+        bytes32 computedRoot = MerkleVerifier.computeRootFromPackedFrontier20BlobTransport(
             frontierEntries, numQueries, depth, blob, decommOffset, decommLen
         );
         if (computedRoot != expectedRoot) {
@@ -681,6 +662,55 @@ library WhirVerifierCore5 {
             uint256 nextOffset
         )
     {
+        return _verifyRoundStirAndCombineConstraintBlobTransport(
+            challenger,
+            expectedRoot,
+            blob,
+            valuesOffset,
+            decommLen,
+            powWitnessOffset,
+            allRandomness,
+            randomnessOffset,
+            oodAnswer,
+            powBits,
+            domainSize,
+            numQueries,
+            depth,
+            foldedDomainGen,
+            expectedKind,
+            valuesByteLen,
+            false
+        );
+    }
+
+    function _verifyRoundStirAndCombineConstraintBlobTransport(
+        KeccakChallenger.State memory challenger,
+        bytes32 expectedRoot,
+        bytes calldata blob,
+        uint256 valuesOffset,
+        uint256 decommLen,
+        uint256 powWitnessOffset,
+        uint256[] memory allRandomness,
+        uint256 randomnessOffset,
+        uint256 oodAnswer,
+        uint256 powBits,
+        uint256 domainSize,
+        uint256 numQueries,
+        uint256 depth,
+        uint256 foldedDomainGen,
+        uint8 expectedKind,
+        uint256 valuesByteLen,
+        bool compact
+    )
+        internal
+        pure
+        returns (
+            uint256 challenge,
+            uint256 claimedContribution,
+            uint256[] memory selVars,
+            uint256 nextOffset
+        )
+    {
         _checkWitnessBaseLeBlob(challenger, powBits, blob, powWitnessOffset);
         challenger.sampleBase();
 
@@ -691,6 +721,11 @@ library WhirVerifierCore5 {
         }
 
         uint256 decommOffset = valuesOffset + valuesByteLen;
+        uint256[] memory compactOffsets;
+        if (compact && expectedKind != 0) {
+            (compactOffsets, decommOffset) =
+                QuinticTransportCodec.rowOffsets(blob, valuesOffset, numQueries, 16);
+        }
         nextOffset = decommOffset + decommLen * 20;
 
         (challenge, claimedContribution, selVars) = _verifyStirAndCombineConstraintBlob16NativeFused(
@@ -707,7 +742,8 @@ library WhirVerifierCore5 {
             allRandomness,
             randomnessOffset,
             expectedKind,
-            oodAnswer
+            oodAnswer,
+            compactOffsets
         );
     }
 
@@ -722,6 +758,63 @@ library WhirVerifierCore5 {
         uint256 randomnessOffset,
         uint256 finalPolyOffset
     ) internal pure returns (uint256 nextOffset) {
+        bytes memory empty;
+        return _verifyFinalStirChallengesBlobFixedTransport(
+            challenger,
+            expectedRoot,
+            blob,
+            valuesOffset,
+            decommLen,
+            powWitnessOffset,
+            allRandomness,
+            randomnessOffset,
+            finalPolyOffset,
+            false,
+            empty
+        );
+    }
+
+    function _verifyFinalStirChallengesBlobFixedTransport(
+        KeccakChallenger.State memory challenger,
+        bytes32 expectedRoot,
+        bytes calldata blob,
+        uint256 valuesOffset,
+        uint256 decommLen,
+        uint256 powWitnessOffset,
+        uint256[] memory allRandomness,
+        uint256 randomnessOffset,
+        uint256 finalPolyOffset,
+        bool compact,
+        bytes memory finalPolyMemory
+    ) internal pure returns (uint256 nextOffset) {
+        (nextOffset,) = _verifyFinalStirChallengesBlobFixedTransportCached(
+                challenger,
+                expectedRoot,
+                blob,
+                valuesOffset,
+                decommLen,
+                powWitnessOffset,
+                allRandomness,
+                randomnessOffset,
+                finalPolyOffset,
+                compact,
+                finalPolyMemory
+            );
+    }
+
+    function _verifyFinalStirChallengesBlobFixedTransportCached(
+        KeccakChallenger.State memory challenger,
+        bytes32 expectedRoot,
+        bytes calldata blob,
+        uint256 valuesOffset,
+        uint256 decommLen,
+        uint256 powWitnessOffset,
+        uint256[] memory allRandomness,
+        uint256 randomnessOffset,
+        uint256 finalPolyOffset,
+        bool compact,
+        bytes memory finalPolyMemory
+    ) internal pure returns (uint256 nextOffset, uint256 packedFinalPtr) {
         _checkWitnessBaseLeBlob(challenger, 24, blob, powWitnessOffset);
 
         uint256[] memory indices =
@@ -731,9 +824,14 @@ library WhirVerifierCore5 {
         }
 
         uint256 decommOffset = valuesOffset + 14 * 16 * 20;
+        uint256[] memory compactOffsets;
+        if (compact) {
+            (compactOffsets, decommOffset) =
+                QuinticTransportCodec.rowOffsets(blob, valuesOffset, 14, 16);
+        }
         nextOffset = decommOffset + decommLen * 20;
 
-        _verifyFinalStirChallengesBlob16(
+        packedFinalPtr = _verifyFinalStirChallengesBlob16(
             expectedRoot,
             14,
             17,
@@ -746,9 +844,11 @@ library WhirVerifierCore5 {
             allRandomness,
             randomnessOffset,
             finalPolyOffset,
-            64
+            64,
+            compactOffsets,
+            finalPolyMemory
         );
-        return nextOffset;
+        return (nextOffset, packedFinalPtr);
     }
 
     function _parseCommitment(
@@ -1510,25 +1610,8 @@ library WhirVerifierCore5 {
         uint256 eqEval,
         uint256[] memory selVars,
         uint256[] memory fullPoint
-    ) internal pure returns (uint256 total) {
-        unchecked {
-            uint256 i = selVars.length;
-            for (; i > 1;) {
-                uint256 eval0;
-                uint256 eval1;
-                (eval0, eval1) =
-                    _selectCubicPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 4, 18);
-                total = _hornerStep(total, challenge, eval0);
-                total = _hornerStep(total, challenge, eval1);
-                i -= 2;
-            }
-            if (i != 0) {
-                total = _hornerStep(
-                    total, challenge, _selectCubicPolyEvalFixed(selVars[0], fullPoint, 4, 18)
-                );
-            }
-        }
-        total = _hornerStep(total, challenge, eqEval);
+    ) internal pure returns (uint256) {
+        return _evaluateConstraintCubicFused(challenge, eqEval, selVars, fullPoint, 18);
     }
 
     function _evaluateConstraintCubicRaw14WithPrecomputedEq(
@@ -1536,25 +1619,8 @@ library WhirVerifierCore5 {
         uint256 eqEval,
         uint256[] memory selVars,
         uint256[] memory fullPoint
-    ) internal pure returns (uint256 total) {
-        unchecked {
-            uint256 i = selVars.length;
-            for (; i > 1;) {
-                uint256 eval0;
-                uint256 eval1;
-                (eval0, eval1) =
-                    _selectCubicPolyEvalFixedPair(selVars[i - 1], selVars[i - 2], fullPoint, 8, 14);
-                total = _hornerStep(total, challenge, eval0);
-                total = _hornerStep(total, challenge, eval1);
-                i -= 2;
-            }
-            if (i != 0) {
-                total = _hornerStep(
-                    total, challenge, _selectCubicPolyEvalFixed(selVars[0], fullPoint, 8, 14)
-                );
-            }
-        }
-        total = _hornerStep(total, challenge, eqEval);
+    ) internal pure returns (uint256) {
+        return _evaluateConstraintCubicFused(challenge, eqEval, selVars, fullPoint, 14);
     }
 
     function _evaluateConstraintCubicRaw10WithPrecomputedEq(
@@ -1562,26 +1628,223 @@ library WhirVerifierCore5 {
         uint256 eqEval,
         uint256[] memory selVars,
         uint256[] memory fullPoint
-    ) internal pure returns (uint256 total) {
-        unchecked {
-            uint256 i = selVars.length;
-            for (; i > 1;) {
-                uint256 eval0;
-                uint256 eval1;
-                (eval0, eval1) = _selectCubicPolyEvalFixedPair(
-                    selVars[i - 1], selVars[i - 2], fullPoint, 12, 10
-                );
-                total = _hornerStep(total, challenge, eval0);
-                total = _hornerStep(total, challenge, eval1);
-                i -= 2;
+    ) internal pure returns (uint256) {
+        return _evaluateConstraintCubicFused(challenge, eqEval, selVars, fullPoint, 10);
+    }
+
+    /// @dev Native fixed schedule only: each select has 10, 14, or 18 coordinates
+    /// ending at point[21]. Keep E=a4+a2*2^64+a0*2^128 and O=a3+a1*2^64
+    /// throughout select multiplication and Horner accumulation. All coefficients
+    /// are canonical. Even and odd convolutions have at most three terms per lane;
+    /// the direct cross product has at most four, and 4*(p-1)^2 < 2^64.
+    /// The E*E coefficient discarded above bit 255 is recovered as a0*b0.
+    /// Reduction uses X^5=1-X^2; the p*2^40 bias prevents unsigned underflow.
+    /// Biased reduction numerators, including a Horner weight, are below 2^72.
+    function _evaluateConstraintCubicFused(
+        uint256 challenge,
+        uint256 eqEval,
+        uint256[] memory selVars,
+        uint256[] memory cache,
+        uint256 dimensions
+    ) private pure returns (uint256 out) {
+        assembly ("memory-safe") {
+            function forms(packed) -> even, odd {
+                even := and(shr(96, packed), 0xffffffff00000000ffffffff00000000ffffffff)
+                odd := and(shr(128, packed), 0xffffffff00000000ffffffff)
             }
-            if (i != 0) {
-                total = _hornerStep(
-                    total, challenge, _selectCubicPolyEvalFixed(selVars[0], fullPoint, 12, 10)
-                );
+            function cubic(ptr, x) -> lowOut, revOut, x2 {
+                let M := 0x7f000001
+                x2 := mulmod(x, x, M)
+                let x3 := mulmod(x2, x, M)
+                // The transposed cache stores (a,b,c,d) per coefficient.
+                // The high lane is a+b*x+c*x^2+d*x^3; its four terms fit in 64 bits.
+                let powers := or(or(x3, shl(64, x2)), or(shl(128, x), shl(192, 1)))
+                lowOut := or(
+                    or(
+                        mod(shr(192, mul(mload(add(ptr, 128)), powers)), M),
+                        shl(64, mod(shr(192, mul(mload(add(ptr, 64)), powers)), M))
+                    ),
+                    shl(128, mod(shr(192, mul(mload(ptr), powers)), M))
+                )
+                revOut := or(
+                    mod(shr(192, mul(mload(add(ptr, 96)), powers)), M),
+                    shl(64, mod(shr(192, mul(mload(add(ptr, 32)), powers)), M))
+                )
             }
+            function multiply(aLow, aRev, bLow, bRev) -> lowOut, revOut {
+                let M := 0x7f000001
+                let even := mul(aLow, bLow)
+                let odd := mul(aRev, bRev)
+                let cross := add(mul(aLow, bRev), mul(aRev, bLow))
+                let c0 := mul(shr(128, aLow), shr(128, bLow))
+                let laneMask := 0xffffffffffffffff
+                let c1 := shr(192, cross)
+                let c2 := add(shr(192, even), shr(128, odd))
+                let c3 := and(shr(128, cross), laneMask)
+                let c4 := add(and(shr(128, even), laneMask), and(shr(64, odd), laneMask))
+                let c5 := and(shr(64, cross), laneMask)
+                let c6 := add(and(shr(64, even), laneMask), and(odd, laneMask))
+                let c7 := and(cross, laneMask)
+                let c8 := and(even, laneMask)
+                let bias := shl(40, M)
+                let o0 := mod(add(add(c0, c5), sub(bias, c8)), M)
+                let o1 := mod(add(c1, c6), M)
+                let o2 := mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)
+                let o3 := mod(add(add(c3, sub(bias, c6)), c8), M)
+                let o4 := mod(add(c4, sub(bias, c7)), M)
+                lowOut := or(or(o4, shl(64, o2)), shl(128, o0))
+                revOut := or(o3, shl(64, o1))
+            }
+            function multiplyAdd(aLow, aRev, bLow, bRev, wLow, wRev) -> lowOut, revOut {
+                let M := 0x7f000001
+                let even := mul(aLow, bLow)
+                let odd := mul(aRev, bRev)
+                let cross := add(mul(aLow, bRev), mul(aRev, bLow))
+                let c0 := mul(shr(128, aLow), shr(128, bLow))
+                let laneMask := 0xffffffffffffffff
+                let c1 := shr(192, cross)
+                let c2 := add(shr(192, even), shr(128, odd))
+                let c3 := and(shr(128, cross), laneMask)
+                let c4 := add(and(shr(128, even), laneMask), and(shr(64, odd), laneMask))
+                let c5 := and(shr(64, cross), laneMask)
+                let c6 := add(and(shr(64, even), laneMask), and(odd, laneMask))
+                let c7 := and(cross, laneMask)
+                let c8 := and(even, laneMask)
+                let bias := shl(40, M)
+                let o0 := mod(add(add(add(c0, c5), sub(bias, c8)), shr(128, wLow)), M)
+                let o1 := mod(add(add(c1, c6), shr(64, wRev)), M)
+                let o2 :=
+                    mod(
+                        add(
+                            add(add(add(c2, sub(bias, c5)), c7), c8),
+                            and(shr(64, wLow), 0xffffffff)
+                        ),
+                        M
+                    )
+                let o3 := mod(add(add(add(c3, sub(bias, c6)), c8), and(wRev, 0xffffffff)), M)
+                let o4 := mod(add(add(c4, sub(bias, c7)), and(wLow, 0xffffffff)), M)
+                lowOut := or(or(o4, shl(64, o2)), shl(128, o0))
+                revOut := or(o3, shl(64, o1))
+            }
+            // Two extension products reduced together: A*B + C*D.
+            // Each extracted convolution lane is < 2^64 before summing.
+            // The coefficient sums fit in 66 bits; biased numerators < 2^73.
+            function multiplyProducts(aLow, aRev, bLow, bRev, cLow, cRev, dLow, dRev) ->
+                lowOut,
+                revOut
+            {
+                let M := 0x7f000001
+                let laneMask := 0xffffffffffffffff
+                let evenA := mul(aLow, bLow)
+                let oddA := mul(aRev, bRev)
+                let crossA := add(mul(aLow, bRev), mul(aRev, bLow))
+                let evenB := mul(cLow, dLow)
+                let oddB := mul(cRev, dRev)
+                let crossB := add(mul(cLow, dRev), mul(cRev, dLow))
+                let bias := shl(41, M)
+                let c0 :=
+                    add(mul(shr(128, aLow), shr(128, bLow)), mul(shr(128, cLow), shr(128, dLow)))
+                let c5 := add(and(shr(64, crossA), laneMask), and(shr(64, crossB), laneMask))
+                let c8 := add(and(evenA, laneMask), and(evenB, laneMask))
+                let o0 := mod(add(add(c0, c5), sub(bias, c8)), M)
+                let c1 := add(shr(192, crossA), shr(192, crossB))
+                let c6 :=
+                    add(
+                        add(and(shr(64, evenA), laneMask), and(oddA, laneMask)),
+                        add(and(shr(64, evenB), laneMask), and(oddB, laneMask))
+                    )
+                let o1 := mod(add(c1, c6), M)
+                let c2 :=
+                    add(add(shr(192, evenA), shr(128, oddA)), add(shr(192, evenB), shr(128, oddB)))
+                let c7 := add(and(crossA, laneMask), and(crossB, laneMask))
+                let o2 := mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)
+                let c3 := add(and(shr(128, crossA), laneMask), and(shr(128, crossB), laneMask))
+                let o3 := mod(add(add(c3, sub(bias, c6)), c8), M)
+                let c4 :=
+                    add(
+                        add(and(shr(128, evenA), laneMask), and(shr(64, oddA), laneMask)),
+                        add(and(shr(128, evenB), laneMask), and(shr(64, oddB), laneMask))
+                    )
+                let o4 := mod(add(c4, sub(bias, c7)), M)
+                lowOut := or(or(o4, shl(64, o2)), shl(128, o0))
+                revOut := or(o3, shl(64, o1))
+            }
+            let queryBase := add(selVars, 32)
+            let queryPtr := add(queryBase, shl(5, mload(selVars)))
+            let cacheEnd := add(cache, 1312)
+            let lastPair := sub(cacheEnd, sub(mul(dimensions, 80), 160))
+            let challengeLow, challengeRev := forms(challenge)
+            let totalLow := 0
+            let totalRev := 0
+            for { } gt(queryPtr, queryBase) { } {
+                queryPtr := sub(queryPtr, 32)
+                // Common five pairs cover 10 coordinates. The only other callers
+                // request 14 or 18, adding two or four pairs in the original order.
+                let low, rev, x2 := cubic(cacheEnd, mload(queryPtr))
+                {
+                    let bLow, bRev, bX2 := cubic(sub(cacheEnd, 160), mulmod(x2, x2, 0x7f000001))
+                    x2 := bX2
+                    low, rev := multiply(low, rev, bLow, bRev)
+                }
+                {
+                    let bLow, bRev, bX2 := cubic(sub(cacheEnd, 320), mulmod(x2, x2, 0x7f000001))
+                    x2 := bX2
+                    low, rev := multiply(low, rev, bLow, bRev)
+                }
+                {
+                    let bLow, bRev, bX2 := cubic(sub(cacheEnd, 480), mulmod(x2, x2, 0x7f000001))
+                    x2 := bX2
+                    low, rev := multiply(low, rev, bLow, bRev)
+                }
+                if gt(dimensions, 10) {
+                    {
+                        let bLow, bRev, bX2 := cubic(sub(cacheEnd, 640), mulmod(x2, x2, 0x7f000001))
+                        x2 := bX2
+                        low, rev := multiply(low, rev, bLow, bRev)
+                    }
+                    {
+                        let bLow, bRev, bX2 := cubic(sub(cacheEnd, 800), mulmod(x2, x2, 0x7f000001))
+                        x2 := bX2
+                        low, rev := multiply(low, rev, bLow, bRev)
+                    }
+                }
+                if gt(dimensions, 14) {
+                    {
+                        let bLow, bRev, bX2 := cubic(sub(cacheEnd, 960), mulmod(x2, x2, 0x7f000001))
+                        x2 := bX2
+                        low, rev := multiply(low, rev, bLow, bRev)
+                    }
+                    {
+                        let bLow, bRev, bX2 :=
+                            cubic(sub(cacheEnd, 1120), mulmod(x2, x2, 0x7f000001))
+                        x2 := bX2
+                        low, rev := multiply(low, rev, bLow, bRev)
+                    }
+                }
+                let bLow, bRev, unusedX2 := cubic(lastPair, mulmod(x2, x2, 0x7f000001))
+                switch or(totalLow, totalRev)
+                case 0 {
+                    totalLow, totalRev := multiply(low, rev, bLow, bRev)
+                }
+                default {
+                    totalLow, totalRev :=
+                        multiplyProducts(
+                        totalLow,
+                        totalRev,
+                        challengeLow,
+                        challengeRev,
+                        low,
+                        rev,
+                        bLow,
+                        bRev
+                    )
+                }
+            }
+            let eqLow, eqRev := forms(eqEval)
+            totalLow, totalRev :=
+                multiplyAdd(totalLow, totalRev, challengeLow, challengeRev, eqLow, eqRev)
+            out := or(shl(96, totalLow), shl(128, totalRev))
         }
-        total = _hornerStep(total, challenge, eqEval);
     }
 
     function _eqPolyEvalAt(
@@ -1758,7 +2021,12 @@ library WhirVerifierCore5 {
         pure
         returns (uint256[] memory cache)
     {
-        cache = new uint256[](45);
+        // All 45 words are assigned below before the cache can escape.
+        assembly ("memory-safe") {
+            cache := mload(0x40)
+            mstore(cache, 45)
+            mstore(0x40, add(cache, 1472))
+        }
         for (uint256 i; i < 9; ++i) {
             uint256 r = point[2 * i + 5];
             uint256 s = point[2 * i + 4];
@@ -1769,11 +2037,49 @@ library WhirVerifierCore5 {
                 KoalaBearExt5.add(KoalaBearExt5.sub(KoalaBearExt5.sub(uint256(1) << 224, r), s), d);
             uint256 ptr;
             assembly ("memory-safe") { ptr := add(add(cache, 32), mul(i, 160)) }
-            _storeSelectCubicForm(ptr, a);
-            _storeSelectCubicForm(ptr + 32, b);
-            _storeSelectCubicForm(ptr + 64, cc);
-            _storeSelectCubicForm(ptr + 96, d);
             assembly ("memory-safe") {
+                // One radix-64 word per extension coefficient, ordered a,b,c,d.
+                // Its product with (x^3,x^2,x,1) exposes the cubic value in lane 3.
+                mstore(
+                    add(ptr, 0),
+                    or(
+                        or(and(shr(224, a), 0xffffffff), shl(64, and(shr(224, b), 0xffffffff))),
+                        or(
+                            shl(128, and(shr(224, cc), 0xffffffff)),
+                            shl(192, and(shr(224, d), 0xffffffff))
+                        )
+                    )
+                )
+                mstore(
+                    add(ptr, 32),
+                    or(
+                        or(and(shr(192, a), 0xffffffff), shl(64, and(shr(192, b), 0xffffffff))),
+                        or(
+                            shl(128, and(shr(192, cc), 0xffffffff)),
+                            shl(192, and(shr(192, d), 0xffffffff))
+                        )
+                    )
+                )
+                mstore(
+                    add(ptr, 64),
+                    or(
+                        or(and(shr(160, a), 0xffffffff), shl(64, and(shr(160, b), 0xffffffff))),
+                        or(
+                            shl(128, and(shr(160, cc), 0xffffffff)),
+                            shl(192, and(shr(160, d), 0xffffffff))
+                        )
+                    )
+                )
+                mstore(
+                    add(ptr, 96),
+                    or(
+                        or(and(shr(128, a), 0xffffffff), shl(64, and(shr(128, b), 0xffffffff))),
+                        or(
+                            shl(128, and(shr(128, cc), 0xffffffff)),
+                            shl(192, and(shr(128, d), 0xffffffff))
+                        )
+                    )
+                )
                 mstore(
                     add(ptr, 128),
                     or(
@@ -1843,41 +2149,22 @@ library WhirVerifierCore5 {
             let x2 := mulmod(x, x, M)
             let x3 := mulmod(x2, x, M)
             next := mulmod(x2, x2, M)
-            let low :=
-                add(
-                    add(mload(ptr), mul(mload(add(ptr, 32)), x)),
-                    add(mul(mload(add(ptr, 64)), x2), mul(mload(add(ptr, 96)), x3))
-                )
-            let last :=
-                shr(
-                    192,
-                    mul(mload(add(ptr, 128)), or(or(x3, shl(64, x2)), or(shl(128, x), shl(192, 1))))
-                )
-            let o0 := mod(and(low, 0xffffffffffffffff), M)
-            let o1 := mod(and(shr(64, low), 0xffffffffffffffff), M)
-            let o2 := mod(and(shr(128, low), 0xffffffffffffffff), M)
-            let o3 := mod(shr(192, low), M)
-            let o4 := mod(last, M)
+            let powers := or(or(x3, shl(64, x2)), or(shl(128, x), shl(192, 1)))
+            let o0 := mod(shr(192, mul(mload(add(ptr, 0)), powers)), M)
+            let o1 := mod(shr(192, mul(mload(add(ptr, 32)), powers)), M)
+            let o2 := mod(shr(192, mul(mload(add(ptr, 64)), powers)), M)
+            let o3 := mod(shr(192, mul(mload(add(ptr, 96)), powers)), M)
+            let o4 := mod(shr(192, mul(mload(add(ptr, 128)), powers)), M)
             lowOut := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
             revOut := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
         }
     }
 
-    function _storeSelectCubicForm(uint256 ptr, uint256 b) private pure {
-        assembly ("memory-safe") {
-            mstore(
-                ptr,
-                or(
-                    or(shr(224, b), shl(64, and(shr(192, b), 0xffffffff))),
-                    or(
-                        shl(128, and(shr(160, b), 0xffffffff)),
-                        shl(192, and(shr(128, b), 0xffffffff))
-                    )
-                )
-            )
-        }
-    }
-
+    /// @dev EQ accumulators keep E=a4+a2*2^64+a0*2^128 and O=a3+a1*2^64.
+    /// Both inputs are first shifted by -1/2 in their constant coefficient.
+    /// Thus eq(a,q)=2*(a-1/2)*(q-1/2)+1/2. The cache stores E(q),O(q),E(q)+O(q).
+    /// Karatsuba lane/carry bounds are identical to KoalaBearExt5._mulPacked.
+    /// After doubling and the p*2^40 bias, every numerator is below 2^73.
     function _eqTermForms(uint256 acc, uint256[4] memory cache)
         internal
         pure
@@ -1885,82 +2172,67 @@ library WhirVerifierCore5 {
     {
         assembly ("memory-safe") {
             let M := 0x7f000001
-            let mask := 0xffffffff
-
-            let low
-            let high
-            let c4
-            {
-                let a0 := mod(add(shr(224, acc), shr(1, M)), M)
-                let a1 := and(shr(192, acc), mask)
-                let a2 := and(shr(160, acc), mask)
-                let a3 := and(shr(128, acc), mask)
-                let a4 := and(shr(96, acc), mask)
-                let bLow := mload(cache)
-                let aLow := or(or(a0, shl(64, a1)), or(shl(128, a2), shl(192, a3)))
-                c4 := add(
-                    shr(192, mul(aLow, mload(add(cache, 32)))),
-                    mul(a4, and(bLow, 0xffffffff))
+            let ae :=
+                or(
+                    and(shr(96, acc), 0xffffffff00000000ffffffff),
+                    shl(128, mod(add(shr(224, acc), shr(1, M)), M))
                 )
-                low := mul(aLow, bLow)
-                high := mul(
-                    or(or(a4, shl(64, a3)), or(shl(128, a2), shl(192, a1))),
-                    mload(add(cache, 64))
-                )
-            }
+            let ao := and(shr(128, acc), 0xffffffff00000000ffffffff)
+            let be := mload(cache)
+            let bo := mload(add(cache, 32))
+            let even := mul(ae, be)
+            let odd := mul(ao, bo)
+            let cross := sub(sub(mul(add(ae, ao), mload(add(cache, 64))), even), odd)
+            let c0 := mul(shr(128, ae), shr(128, be))
             let laneMask := 0xffffffffffffffff
-            let c0 := and(low, laneMask)
-            let c1 := and(shr(64, low), laneMask)
-            let c2 := and(shr(128, low), laneMask)
-            let c3 := shr(192, low)
-            let c5 := shr(192, high)
-            let c6 := and(shr(128, high), laneMask)
-            let c7 := and(shr(64, high), laneMask)
-            let c8 := and(high, laneMask)
+            let c1 := shr(192, cross)
+            let c2 := add(shr(192, even), shr(128, odd))
+            let c3 := and(shr(128, cross), laneMask)
+            let c4 := add(and(shr(128, even), laneMask), and(shr(64, odd), laneMask))
+            let c5 := and(shr(64, cross), laneMask)
+            let c6 := add(and(shr(64, even), laneMask), and(odd, laneMask))
+            let c7 := and(cross, laneMask)
+            let c8 := and(even, laneMask)
             let bias := shl(40, M)
             let o0 := mod(add(shl(1, add(add(c0, c5), sub(bias, c8))), add(shr(1, M), 1)), M)
             let o1 := mod(shl(1, add(c1, c6)), M)
             let o2 := mod(shl(1, add(add(add(c2, sub(bias, c5)), c7), c8)), M)
             let o3 := mod(shl(1, add(add(c3, sub(bias, c6)), c8)), M)
             let o4 := mod(shl(1, add(c4, sub(bias, c7))), M)
-            outLow := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
-            outRev := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
+            outLow := or(or(o4, shl(64, o2)), shl(128, o0))
+            outRev := or(o3, shl(64, o1))
         }
     }
 
-    function _mulEqTermForms(uint256 aLow, uint256 aRev, uint256 bLow, uint256 bRev)
+    /// @dev Multiply two canonical even/odd accumulators without repacking transport words.
+    function _mulEqTermForms(uint256 ae, uint256 ao, uint256 be, uint256 bo)
         internal
         pure
         returns (uint256 outLow, uint256 outRev)
     {
         assembly ("memory-safe") {
             let M := 0x7f000001
-            let mask := 0xffffffff
-
-            let low := mul(aLow, bLow)
-            let high := mul(aRev, bRev)
-            let c4 :=
-                add(
-                    shr(192, mul(aLow, or(shr(64, bLow), shl(192, and(bRev, 0xffffffff))))),
-                    mul(and(aRev, 0xffffffff), and(bLow, 0xffffffff))
-                )
+            let even := mul(ae, be)
+            let odd := mul(ao, bo)
+            let cross := sub(sub(mul(add(ae, ao), add(be, bo)), even), odd)
+            let c0 := mul(shr(128, ae), shr(128, be))
             let laneMask := 0xffffffffffffffff
-            let c0 := and(low, laneMask)
-            let c1 := and(shr(64, low), laneMask)
-            let c2 := and(shr(128, low), laneMask)
-            let c3 := shr(192, low)
-            let c5 := shr(192, high)
-            let c6 := and(shr(128, high), laneMask)
-            let c7 := and(shr(64, high), laneMask)
-            let c8 := and(high, laneMask)
+            let c1 := shr(192, cross)
+            let c2 := add(shr(192, even), shr(128, odd))
+            let c3 := and(shr(128, cross), laneMask)
+            let c4 := add(and(shr(128, even), laneMask), and(shr(64, odd), laneMask))
+            let c5 := and(shr(64, cross), laneMask)
+            let c6 := add(and(shr(64, even), laneMask), and(odd, laneMask))
+            let c7 := and(cross, laneMask)
+            let c8 := and(even, laneMask)
             let bias := shl(40, M)
             let o0 := mod(add(add(c0, c5), sub(bias, c8)), M)
             let o1 := mod(add(c1, c6), M)
             let o2 := mod(add(add(add(c2, sub(bias, c5)), c7), c8), M)
             let o3 := mod(add(add(c3, sub(bias, c6)), c8), M)
             let o4 := mod(add(c4, sub(bias, c7)), M)
-            outLow := or(or(o0, shl(64, o1)), or(shl(128, o2), shl(192, o3)))
-            outRev := or(or(o4, shl(64, o3)), or(shl(128, o2), shl(192, o1)))
+            outLow := or(or(o4, shl(64, o2)), shl(128, o0))
+            outRev := or(o3, shl(64, o1))
         }
     }
 
@@ -2005,31 +2277,24 @@ library WhirVerifierCore5 {
         return _packEqTermForms(low, rev);
     }
 
-    function _packEqTermForms(uint256 low, uint256 rev) private pure returns (uint256 out) {
+    function _packEqTermForms(uint256 even, uint256 odd) private pure returns (uint256 out) {
         assembly ("memory-safe") {
-            out := or(
-                or(
-                    or(shl(224, and(low, 0xffffffff)), shl(192, and(shr(64, low), 0xffffffff))),
-                    or(shl(160, and(shr(128, low), 0xffffffff)), shl(128, shr(192, low)))
-                ),
-                shl(96, and(rev, 0xffffffff))
-            )
+            out := or(shl(96, even), shl(128, odd))
         }
     }
 
     function _prepareEqTermForms(uint256 q, uint256[4] memory cache) internal pure {
         assembly ("memory-safe") {
             let M := 0x7f000001
-            let q0 := and(shr(224, q), 0xffffffff)
-            let q1 := and(shr(192, q), 0xffffffff)
-            let q2 := and(shr(160, q), 0xffffffff)
-            let q3 := and(shr(128, q), 0xffffffff)
-            let q4 := and(shr(96, q), 0xffffffff)
-            q0 := mod(add(q0, shr(1, M)), M)
-            let low := or(or(q0, shl(64, q1)), or(shl(128, q2), shl(192, q3)))
-            mstore(cache, low)
-            mstore(add(cache, 32), or(shr(64, low), shl(192, q4)))
-            mstore(add(cache, 64), or(or(q4, shl(64, q3)), or(shl(128, q2), shl(192, q1))))
+            let even :=
+                or(
+                    and(shr(96, q), 0xffffffff00000000ffffffff),
+                    shl(128, mod(add(shr(224, q), shr(1, M)), M))
+                )
+            let odd := and(shr(128, q), 0xffffffff00000000ffffffff)
+            mstore(cache, even)
+            mstore(add(cache, 32), odd)
+            mstore(add(cache, 64), add(even, odd))
         }
     }
 }

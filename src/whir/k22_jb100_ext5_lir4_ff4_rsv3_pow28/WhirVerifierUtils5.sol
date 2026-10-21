@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { LibSort } from "solady/utils/LibSort.sol";
+import { QuinticTransportCodec } from "./QuinticTransportCodec.sol";
+
+import { SmallQuerySort } from "./SmallQuerySort.sol";
 
 import { KoalaBear } from "../../field/KoalaBear.sol";
 import { KoalaBearExt5 } from "../../field/KoalaBearExt5.sol";
@@ -79,7 +81,7 @@ library WhirVerifierUtils5 {
         pure
         returns (uint256)
     {
-        return _prepareRowWeights(_computeDim4EqWeights(p0, p1, p2, p3));
+        return _prepareRowWeightsLazy(_computeDim4EqWeights(p0, p1, p2, p3));
     }
 
     function validateBase(uint256 value) internal pure {
@@ -177,8 +179,7 @@ library WhirVerifierUtils5 {
         }
 
         if (queries.length > 1) {
-            LibSort.sort(queries);
-            LibSort.uniquifySorted(queries);
+            SmallQuerySort.sortUnique(queries);
         }
     }
 
@@ -370,24 +371,106 @@ library WhirVerifierUtils5 {
         pure
         returns (uint256 ptr)
     {
+        uint256 source;
+        assembly ("memory-safe") { source := add(blob.offset, offset) }
+        return _prepareHornerRadix64Source(source, false);
+    }
+
+    function _prepareHornerRadix64Memory(bytes memory polynomial)
+        internal
+        pure
+        returns (uint256 ptr)
+    {
+        uint256 source;
+        assembly ("memory-safe") { source := add(polynomial, 32) }
+        return _prepareHornerRadix64Source(source, true);
+    }
+
+    function _prepareHornerRadix64Source(uint256 src, bool inMemory)
+        private
+        pure
+        returns (uint256 ptr)
+    {
         assembly ("memory-safe") {
+            function loadWord(source, memoryInput) -> word {
+                switch memoryInput
+                case 0 { word := calldataload(source) }
+                default { word := mload(source) }
+            }
             ptr := mload(0x40)
-            mstore(0x40, add(ptr, 4096))
-            let src := add(blob.offset, offset)
-            for { let i := 0 } lt(i, 64) { i := add(i, 1) } {
-                let w := calldataload(add(src, mul(i, 20)))
-                let dst := add(ptr, shl(6, i))
-                mstore(
-                    dst,
-                    or(
-                        or(shr(224, w), shl(64, and(shr(192, w), 0xffffffff))),
+            let first := loadWord(src, inMemory)
+            let mask := 0x00000000ffffffffffffffffffffffffffffffff000000000000000000000000
+            let common := iszero(and(xor(first, loadWord(add(src, 20), inMemory)), mask))
+            if common {
+                let different := 0
+                for { let i := 0 } lt(i, 64) { i := add(i, 8) } {
+                    let source := add(src, mul(i, 20))
+                    let word := 0
+                    {
+                        let value := loadWord(add(source, 0), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(224, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 20), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(192, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 40), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(160, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 60), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(128, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 80), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(96, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 100), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(64, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 120), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(32, shr(224, value)))
+                    }
+                    {
+                        let value := loadWord(add(source, 140), inMemory)
+                        different := or(different, xor(first, value))
+                        word := or(word, shl(0, shr(224, value)))
+                    }
+                    mstore(add(add(ptr, 64), mul(i, 4)), word)
+                }
+                common := iszero(and(different, mask))
+            }
+            mstore(ptr, common)
+            mstore(add(ptr, 32), and(first, mask))
+            switch common
+            case 1 { mstore(0x40, add(ptr, 320)) }
+            default {
+                mstore(0x40, add(ptr, 4160))
+                for { let i := 0 } lt(i, 64) { i := add(i, 1) } {
+                    let w := loadWord(add(src, mul(i, 20)), inMemory)
+                    let dst := add(add(ptr, 64), shl(6, i))
+                    mstore(
+                        dst,
                         or(
-                            shl(128, and(shr(160, w), 0xffffffff)),
-                            shl(192, and(shr(128, w), 0xffffffff))
+                            or(shr(224, w), shl(64, and(shr(192, w), 0xffffffff))),
+                            or(
+                                shl(128, and(shr(160, w), 0xffffffff)),
+                                shl(192, and(shr(128, w), 0xffffffff))
+                            )
                         )
                     )
-                )
-                mstore(add(dst, 32), and(shr(96, w), 0xffffffff))
+                    mstore(add(dst, 32), and(shr(96, w), 0xffffffff))
+                }
             }
         }
     }
@@ -395,7 +478,53 @@ library WhirVerifierUtils5 {
     /// @dev Each 64-bit lane is bounded by
     /// `4 * (p - 1)^2 + (p - 1) = 18159639599595388928 < 2^64`.
     function _hornerRadix64(uint256 ptr, uint256 x) internal pure returns (uint256 out) {
+        bool commonColumns;
+        uint256 common;
         assembly ("memory-safe") {
+            commonColumns := mload(ptr)
+            common := mload(add(ptr, 32))
+        }
+        if (commonColumns) {
+            uint256 scalar;
+            uint256 geometric;
+            assembly ("memory-safe") {
+                let M := 0x7f000001
+                let x2 := mulmod(x, x, M)
+                let x3 := mulmod(x2, x, M)
+                let x4 := mulmod(x2, x2, M)
+                let base := add(ptr, 64)
+                for { let src := add(ptr, 320) } gt(src, base) { } {
+                    src := sub(src, 16)
+                    let word := mload(src)
+                    scalar := mod(
+                        add(
+                            add(
+                                add(
+                                    add(mul(scalar, x4), mul(and(shr(128, word), 0xffffffff), x3)),
+                                    mul(and(shr(160, word), 0xffffffff), x2)
+                                ),
+                                mul(and(shr(192, word), 0xffffffff), x)
+                            ),
+                            shr(224, word)
+                        ),
+                        M
+                    )
+                }
+                geometric := mulmod(add(1, x), add(1, x2), M)
+                geometric := mulmod(geometric, add(1, x4), M)
+                let power := mulmod(x4, x4, M)
+                geometric := mulmod(geometric, add(1, power), M)
+                power := mulmod(power, power, M)
+                geometric := mulmod(geometric, add(1, power), M)
+                power := mulmod(power, power, M)
+                geometric := mulmod(geometric, add(1, power), M)
+            }
+            return KoalaBearExt5.add(
+                KoalaBearExt5.fromBase(scalar), KoalaBearExt5.mulBase(common, geometric)
+            );
+        }
+        assembly ("memory-safe") {
+            ptr := add(ptr, 64)
             let M := 0x7f000001
             let mask := 0xffffffffffffffff
             let a := 0
@@ -599,6 +728,91 @@ library WhirVerifierUtils5 {
         uint256 b = _evaluateFinalRow16(blob, offset + 320, weights);
         uint256 d = _evaluateFinalRow16(blob, offset + 640, weights);
         uint256 e = _evaluateFinalRow16(blob, offset + 960, weights);
+        uint256 p1 = fullPoint[pointOffset + 1];
+        uint256 left = KoalaBearExt5.add(a, KoalaBearExt5.mul(KoalaBearExt5.sub(b, a), p1));
+        uint256 right = KoalaBearExt5.add(d, KoalaBearExt5.mul(KoalaBearExt5.sub(e, d), p1));
+        return KoalaBearExt5.add(
+            left, KoalaBearExt5.mul(KoalaBearExt5.sub(right, left), fullPoint[pointOffset])
+        );
+    }
+
+    /// @dev Only a live cache from _prepareHornerRadix64[Memory] may be passed.
+    /// The producer checks all 64 common-column tuples. Noncommon input returns
+    /// false so the caller uses the general final-value evaluator.
+    function evaluateFinalValueHornerCache64Dim6(
+        uint256 ptr,
+        uint256[] memory fullPoint,
+        uint256 pointOffset
+    ) internal pure returns (bool reused, uint256 value) {
+        uint256 common;
+        assembly ("memory-safe") {
+            reused := mload(ptr)
+            common := mload(add(ptr, 32))
+        }
+        if (!reused) return (false, 0);
+        // These exact equality weights sum to ONE: every split replaces w with
+        // (w - w*r, w*r). No assumption is made about arbitrary caller weights.
+        uint256 weights = _prepareBaseRadix64(
+            _computeDim4EqWeights(
+                fullPoint[pointOffset + 2],
+                fullPoint[pointOffset + 3],
+                fullPoint[pointOffset + 4],
+                fullPoint[pointOffset + 5]
+            )
+        );
+        // One loop call site avoids cloning the full scalar kernel four times.
+        uint256[4] memory scalarRows;
+        unchecked {
+            for (uint256 i = 0; i < 4; ++i) {
+                scalarRows[i] = _evaluateCachedScalarRow16(ptr + 64 + 64 * i, weights);
+            }
+        }
+        uint256 a = scalarRows[0];
+        uint256 b = scalarRows[1];
+        uint256 d = scalarRows[2];
+        uint256 e = scalarRows[3];
+        uint256 p1 = fullPoint[pointOffset + 1];
+        uint256 left = KoalaBearExt5.add(a, KoalaBearExt5.mul(KoalaBearExt5.sub(b, a), p1));
+        uint256 right = KoalaBearExt5.add(d, KoalaBearExt5.mul(KoalaBearExt5.sub(e, d), p1));
+        // The two remaining multilinear splits also preserve the common term.
+        value = KoalaBearExt5.add(
+            common,
+            KoalaBearExt5.add(
+                left, KoalaBearExt5.mul(KoalaBearExt5.sub(right, left), fullPoint[pointOffset])
+            )
+        );
+    }
+
+    function _evaluateCachedScalarRow16(uint256 ptr, uint256 weights)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 w0;
+        uint256 w1;
+        assembly ("memory-safe") {
+            w0 := mload(ptr)
+            w1 := mload(add(ptr, 32))
+        }
+        return _dotBaseRadix64(weights, w0, w1);
+    }
+
+    function evaluateFinalValueMemory64Dim6(
+        bytes memory blob,
+        uint256 offset,
+        uint256[] memory fullPoint,
+        uint256 pointOffset
+    ) internal pure returns (uint256) {
+        uint256 weights = _computeDim4EqWeightsUnpacked(
+            fullPoint[pointOffset + 2],
+            fullPoint[pointOffset + 3],
+            fullPoint[pointOffset + 4],
+            fullPoint[pointOffset + 5]
+        );
+        uint256 a = _evaluateFinalRow16Memory(blob, offset, weights);
+        uint256 b = _evaluateFinalRow16Memory(blob, offset + 320, weights);
+        uint256 d = _evaluateFinalRow16Memory(blob, offset + 640, weights);
+        uint256 e = _evaluateFinalRow16Memory(blob, offset + 960, weights);
         uint256 p1 = fullPoint[pointOffset + 1];
         uint256 left = KoalaBearExt5.add(a, KoalaBearExt5.mul(KoalaBearExt5.sub(b, a), p1));
         uint256 right = KoalaBearExt5.add(d, KoalaBearExt5.mul(KoalaBearExt5.sub(e, d), p1));
@@ -920,31 +1134,11 @@ library WhirVerifierUtils5 {
         return _foldOnceWithCoeffs(n0, n1, r30, r31, r32, r33, r34);
     }
 
-    function _hashAndEvaluateBaseRowDim4BlobUnpacked(
-        bytes calldata blob,
-        uint256 offset,
-        uint256 weightsPtr,
-        uint256 r00,
-        uint256 r01,
-        uint256 r02,
-        uint256 r03,
-        uint256 r04,
-        uint256 r10,
-        uint256 r11,
-        uint256 r12,
-        uint256 r13,
-        uint256 r14,
-        uint256 r20,
-        uint256 r21,
-        uint256 r22,
-        uint256 r23,
-        uint256 r24,
-        uint256 r30,
-        uint256 r31,
-        uint256 r32,
-        uint256 r33,
-        uint256 r34
-    ) internal pure returns (bytes32 digest, uint256 evalValue) {
+    function _hashAndEvaluateBaseRow16Blob(bytes calldata blob, uint256 offset, uint256 weightsPtr)
+        internal
+        pure
+        returns (bytes32 digest, uint256 evalValue)
+    {
         uint256 src;
         assembly ("memory-safe") {
             src := add(blob.offset, offset)
@@ -960,83 +1154,22 @@ library WhirVerifierUtils5 {
                 revert(0x00, 0x24)
             }
 
-            let modulus := 0x7f000001
             w0 := calldataload(src)
             w1 := calldataload(add(src, 0x20))
 
-            {
-                let v0 := shr(224, w0)
-                let v1 := and(shr(192, w0), 0xffffffff)
-                let v2 := and(shr(160, w0), 0xffffffff)
-                let v3 := and(shr(128, w0), 0xffffffff)
-                let v4 := and(shr(96, w0), 0xffffffff)
-                let v5 := and(shr(64, w0), 0xffffffff)
-                let v6 := and(shr(32, w0), 0xffffffff)
-                let v7 := and(w0, 0xffffffff)
-                if or(
-                    or(
-                        or(iszero(lt(v0, modulus)), iszero(lt(v1, modulus))),
-                        or(iszero(lt(v2, modulus)), iszero(lt(v3, modulus)))
-                    ),
-                    or(
-                        or(iszero(lt(v4, modulus)), iszero(lt(v5, modulus))),
-                        or(iszero(lt(v6, modulus)), iszero(lt(v7, modulus)))
-                    )
-                ) {
-                    revertField(w0)
-                }
-            }
-
-            {
-                let v8 := shr(224, w1)
-                let v9 := and(shr(192, w1), 0xffffffff)
-                let v10 := and(shr(160, w1), 0xffffffff)
-                let v11 := and(shr(128, w1), 0xffffffff)
-                let v12 := and(shr(96, w1), 0xffffffff)
-                let v13 := and(shr(64, w1), 0xffffffff)
-                let v14 := and(shr(32, w1), 0xffffffff)
-                let v15 := and(w1, 0xffffffff)
-                if or(
-                    or(
-                        or(iszero(lt(v8, modulus)), iszero(lt(v9, modulus))),
-                        or(iszero(lt(v10, modulus)), iszero(lt(v11, modulus)))
-                    ),
-                    or(
-                        or(iszero(lt(v12, modulus)), iszero(lt(v13, modulus))),
-                        or(iszero(lt(v14, modulus)), iszero(lt(v15, modulus)))
-                    )
-                ) {
-                    revertField(w1)
-                }
-            }
+            // Any high bit is noncanonical; otherwise adding 2^24-1 cannot
+            // carry across a 32-bit lane and sets its high bit iff c >= p.
+            let laneHighBits := 0x8000000080000000800000008000000080000000800000008000000080000000
+            let laneBias := 0x00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff
+            if and(or(w0, add(w0, laneBias)), laneHighBits) { revertField(w0) }
+            if and(or(w1, add(w1, laneBias)), laneHighBits) { revertField(w1) }
 
             mstore8(ptr, 0x00)
             calldatacopy(add(ptr, 0x01), src, 0x40)
             digest := and(keccak256(ptr, 65), not(sub(shl(96, 1), 1)))
         }
 
-        r00;
-        r01;
-        r02;
-        r03;
-        r04;
-        r10;
-        r11;
-        r12;
-        r13;
-        r14;
-        r20;
-        r21;
-        r22;
-        r23;
-        r24;
-        r30;
-        r31;
-        r32;
-        r33;
-        r34;
-
-        evalValue = _dotBaseRadix80(weightsPtr, w0, w1);
+        evalValue = _dotBaseRadix64(weightsPtr, w0, w1);
     }
 
     function _evaluateExtensionRowDim4BlobWindow(
@@ -1162,30 +1295,105 @@ library WhirVerifierUtils5 {
         return _foldOnceWithCoeffs(n0, n1, r30, r31, r32, r33, r34);
     }
 
-    function _hashAndEvaluateExtension5RowDim4BlobUnpacked(
+    function _hashAndEvaluateCompactRow16(bytes calldata blob, uint256 offset, uint256 weightsPtr)
+        internal
+        pure
+        returns (bytes32 digest, uint256 evalValue)
+    {
+        uint256 mask;
+        uint256 source;
+        assembly ("memory-safe") {
+            source := add(blob.offset, offset)
+            mask := byte(0, calldataload(source))
+        }
+        if (mask == 0) {
+            return _hashAndEvaluateExtensionRow16Blob(blob, offset + 1, weightsPtr);
+        }
+        if (mask == 30) {
+            uint256 common;
+            uint256 w0;
+            uint256 w1;
+            // The bounds were checked by rowOffsets. Validate the actual
+            // reconstructed packed elements before hashing or arithmetic.
+            assembly ("memory-safe") {
+                source := add(source, 1)
+                w0 := calldataload(source)
+                w1 := calldataload(add(source, 32))
+                common := and(
+                    shr(32, calldataload(add(source, 64))),
+                    0x00000000ffffffffffffffffffffffffffffffff000000000000000000000000
+                )
+            }
+            validatePackedExt5(common | ((w0 >> 224) << 224));
+            uint256 invalidBits;
+            assembly ("memory-safe") {
+                let bias := 0x00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff
+                invalidBits := and(
+                    or(or(w0, add(w0, bias)), or(w1, add(w1, bias))),
+                    0x8000000080000000800000008000000080000000800000008000000080000000
+                )
+            }
+            if (invalidBits != 0) {
+                for (uint256 i = 1; i < 16; ++i) {
+                    uint256 value;
+                    assembly ("memory-safe") {
+                        value := or(
+                            common,
+                            shl(224, shr(224, calldataload(add(source, mul(i, 4)))))
+                        )
+                    }
+                    validatePackedExt5(value);
+                }
+            }
+            assembly ("memory-safe") {
+                let ptr := mload(0x40)
+                mstore8(ptr, 0)
+                mstore(add(ptr, 1), or(common, shl(224, shr(224, calldataload(add(source, 0))))))
+                mstore(add(ptr, 21), or(common, shl(224, shr(224, calldataload(add(source, 4))))))
+                mstore(add(ptr, 41), or(common, shl(224, shr(224, calldataload(add(source, 8))))))
+                mstore(add(ptr, 61), or(common, shl(224, shr(224, calldataload(add(source, 12))))))
+                mstore(add(ptr, 81), or(common, shl(224, shr(224, calldataload(add(source, 16))))))
+                mstore(add(ptr, 101), or(common, shl(224, shr(224, calldataload(add(source, 20))))))
+                mstore(add(ptr, 121), or(common, shl(224, shr(224, calldataload(add(source, 24))))))
+                mstore(add(ptr, 141), or(common, shl(224, shr(224, calldataload(add(source, 28))))))
+                mstore(add(ptr, 161), or(common, shl(224, shr(224, calldataload(add(source, 32))))))
+                mstore(add(ptr, 181), or(common, shl(224, shr(224, calldataload(add(source, 36))))))
+                mstore(add(ptr, 201), or(common, shl(224, shr(224, calldataload(add(source, 40))))))
+                mstore(add(ptr, 221), or(common, shl(224, shr(224, calldataload(add(source, 44))))))
+                mstore(add(ptr, 241), or(common, shl(224, shr(224, calldataload(add(source, 48))))))
+                mstore(add(ptr, 261), or(common, shl(224, shr(224, calldataload(add(source, 52))))))
+                mstore(add(ptr, 281), or(common, shl(224, shr(224, calldataload(add(source, 56))))))
+                mstore(add(ptr, 301), or(common, shl(224, shr(224, calldataload(add(source, 60))))))
+                digest := and(keccak256(ptr, 321), not(sub(shl(96, 1), 1)))
+            }
+            (uint256 baseWeights, uint256 weightSum) = _constantRowWeights(weightsPtr);
+            evalValue = KoalaBearExt5.add(
+                _dotBaseRadix64(baseWeights, w0, w1),
+                weightSum == KoalaBearExt5.ONE ? common : KoalaBearExt5.mul(common, weightSum)
+            );
+            return (digest, evalValue);
+        }
+        // All other masks retain the generic field kernel. Reconstruct one row
+        // only, keep it live through the dot product, and hash the original bytes.
+        bytes memory row = new bytes(352);
+        uint256 ptr;
+        assembly ("memory-safe") { ptr := add(row, 32) }
+        QuinticTransportCodec.decodeRowInto(blob, offset, ptr + 1, 16);
+        for (uint256 i; i < 16; ++i) {
+            uint256 value;
+            assembly ("memory-safe") {
+                value := and(mload(add(add(ptr, 1), mul(i, 20))), not(sub(shl(96, 1), 1)))
+            }
+            validatePackedExt5(value);
+        }
+        assembly ("memory-safe") { digest := and(keccak256(ptr, 321), not(sub(shl(96, 1), 1))) }
+        evalValue = _evaluateFinalRow16Memory(row, 1, weightsPtr);
+    }
+
+    function _hashAndEvaluateExtensionRow16Blob(
         bytes calldata blob,
         uint256 offset,
-        uint256 weightsPtr,
-        uint256 r00,
-        uint256 r01,
-        uint256 r02,
-        uint256 r03,
-        uint256 r04,
-        uint256 r10,
-        uint256 r11,
-        uint256 r12,
-        uint256 r13,
-        uint256 r14,
-        uint256 r20,
-        uint256 r21,
-        uint256 r22,
-        uint256 r23,
-        uint256 r24,
-        uint256 r30,
-        uint256 r31,
-        uint256 r32,
-        uint256 r33,
-        uint256 r34
+        uint256 weightsPtr
     ) internal pure returns (bytes32 digest, uint256 evalValue) {
         uint256 src;
         uint256 v0;
@@ -1204,6 +1412,8 @@ library WhirVerifierUtils5 {
         uint256 v13;
         uint256 v14;
         uint256 v15;
+        bool commonColumns;
+        uint256 common;
         assembly ("memory-safe") {
             src := add(blob.offset, offset)
             let lowMask := not(sub(shl(96, 1), 1))
@@ -1345,31 +1555,38 @@ library WhirVerifierUtils5 {
                 validateExt5(v15)
             }
 
+            // Most generic rows fail the first equality check. Only scan the
+            // remaining columns when the first two elements actually match.
+            let commonMask := 0x00000000ffffffffffffffffffffffffffffffff000000000000000000000000
+            commonColumns := iszero(and(xor(v0, v1), commonMask))
+            if commonColumns {
+                let difference := 0
+                difference := or(difference, xor(v0, v2))
+                difference := or(difference, xor(v0, v3))
+                difference := or(difference, xor(v0, v4))
+                difference := or(difference, xor(v0, v5))
+                difference := or(difference, xor(v0, v6))
+                difference := or(difference, xor(v0, v7))
+                difference := or(difference, xor(v0, v8))
+                difference := or(difference, xor(v0, v9))
+                difference := or(difference, xor(v0, v10))
+                difference := or(difference, xor(v0, v11))
+                difference := or(difference, xor(v0, v12))
+                difference := or(difference, xor(v0, v13))
+                difference := or(difference, xor(v0, v14))
+                difference := or(difference, xor(v0, v15))
+                commonColumns := iszero(and(difference, commonMask))
+            }
+            common := and(v0, commonMask)
+
             mstore8(ptr, 0x00)
             calldatacopy(add(ptr, 0x01), src, 320)
             digest := and(keccak256(ptr, 321), lowMask)
         }
 
-        r00;
-        r01;
-        r02;
-        r03;
-        r04;
-        r10;
-        r11;
-        r12;
-        r13;
-        r14;
-        r20;
-        r21;
-        r22;
-        r23;
-        r24;
-        r30;
-        r31;
-        r32;
-        r33;
-        r34;
+        if (commonColumns) {
+            return (digest, _evaluateConstantColumnRow(src, weightsPtr, common));
+        }
 
         evalValue = _dotExt5Weights16Unpacked(
             weightsPtr, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15
@@ -1395,12 +1612,12 @@ library WhirVerifierUtils5 {
         uint256 v14,
         uint256 v15
     ) internal pure returns (uint256 out) {
+        weightsPtr = _genericRowWeights(weightsPtr);
         assembly ("memory-safe") {
             let M := 0x7f000001
             let c0 := 0
             let c1 := 0
-            let c2 := 0
-            function accumulate(a, w, d0, d1, d2) -> e0, e1, e2 {
+            function accumulate(a, b, w, d0, d1) -> e0, e1 {
                 let u :=
                     or(
                         and(shr(224, a), 0xffffffff),
@@ -1415,13 +1632,10 @@ library WhirVerifierUtils5 {
                             )
                         )
                     )
-                let low := and(u, 0xffff000000001fffe000000003fffc000000007fff800000000ffff)
-                let high :=
-                    and(shr(16, u), 0xffff000000001fffe000000003fffc000000007fff800000000ffff)
                 e0 := addmod(
                     d0,
                     mulmod(
-                        low,
+                        u,
                         mload(w),
                         0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                     ),
@@ -1430,106 +1644,118 @@ library WhirVerifierUtils5 {
                 e1 := addmod(
                     d1,
                     mulmod(
-                        high,
+                        and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff),
                         mload(add(w, 32)),
                         0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                     ),
                     0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                 )
-                e2 := addmod(
-                    d2,
+
+                u := or(
+                    and(shr(224, b), 0xffffffff),
+                    or(
+                        shl(51, and(shr(192, b), 0xffffffff)),
+                        or(
+                            shl(102, and(shr(160, b), 0xffffffff)),
+                            or(
+                                shl(153, and(shr(128, b), 0xffffffff)),
+                                shl(204, and(shr(96, b), 0xffffffff))
+                            )
+                        )
+                    )
+                )
+                e0 := addmod(
+                    e0,
                     mulmod(
-                        add(low, high),
+                        u,
                         mload(add(w, 64)),
                         0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                     ),
                     0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                 )
+                e1 := addmod(
+                    e1,
+                    mulmod(
+                        and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff),
+                        mload(add(w, 96)),
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    ),
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                )
             }
-            c0, c1, c2 := accumulate(v0, add(weightsPtr, 0), c0, c1, c2)
-            c0, c1, c2 := accumulate(v1, add(weightsPtr, 96), c0, c1, c2)
-            c0, c1, c2 := accumulate(v2, add(weightsPtr, 192), c0, c1, c2)
-            c0, c1, c2 := accumulate(v3, add(weightsPtr, 288), c0, c1, c2)
-            c0, c1, c2 := accumulate(v4, add(weightsPtr, 384), c0, c1, c2)
-            c0, c1, c2 := accumulate(v5, add(weightsPtr, 480), c0, c1, c2)
-            c0, c1, c2 := accumulate(v6, add(weightsPtr, 576), c0, c1, c2)
-            c0, c1, c2 := accumulate(v7, add(weightsPtr, 672), c0, c1, c2)
-            c0, c1, c2 := accumulate(v8, add(weightsPtr, 768), c0, c1, c2)
-            c0, c1, c2 := accumulate(v9, add(weightsPtr, 864), c0, c1, c2)
-            c0, c1, c2 := accumulate(v10, add(weightsPtr, 960), c0, c1, c2)
-            c0, c1, c2 := accumulate(v11, add(weightsPtr, 1056), c0, c1, c2)
-            c0, c1, c2 := accumulate(v12, add(weightsPtr, 1152), c0, c1, c2)
-            c0, c1, c2 := accumulate(v13, add(weightsPtr, 1248), c0, c1, c2)
-            c0, c1, c2 := accumulate(v14, add(weightsPtr, 1344), c0, c1, c2)
-            c0, c1, c2 := accumulate(v15, add(weightsPtr, 1440), c0, c1, c2)
-            let bias := shl(80, M)
+            c0, c1 := accumulate(v0, v1, add(weightsPtr, 0), c0, c1)
+            c0, c1 := accumulate(v2, v3, add(weightsPtr, 128), c0, c1)
+            c0, c1 := accumulate(v4, v5, add(weightsPtr, 256), c0, c1)
+            c0, c1 := accumulate(v6, v7, add(weightsPtr, 384), c0, c1)
+            c0, c1 := accumulate(v8, v9, add(weightsPtr, 512), c0, c1)
+            c0, c1 := accumulate(v10, v11, add(weightsPtr, 640), c0, c1)
+            c0, c1 := accumulate(v12, v13, add(weightsPtr, 768), c0, c1)
+            c0, c1 := accumulate(v14, v15, add(weightsPtr, 896), c0, c1)
+            // Full/high products obey polynomial reduction modulo N=Q^5+Q^2-1.
+            // Subtracting the high20-bit product times2^22 leaves low11-bit
+            // cross terms. Per term R<=8723116322817. Across16products, each
+            // reduced coefficient lies in[-64R,96R]. B=P*2^18 makes both this
+            // remainder and the high-product digits strictly within[0,Q),Q=2^51.
+            // Recombination modulo P cancels B; no radix carry information is lost.
             c0 := addmod(
                 c0,
-                0x40000000000008000000000001000000000000200000000000040000000000,
+                sub(
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff,
+                    mulmod(
+                        c1,
+                        0x400000,
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    )
+                ),
+                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+            )
+            c0 := addmod(
+                c0,
+                0x1fc00000400003f800000800007f00000100000fe00000200001fc0000040000,
                 0x800000000000000000000000000000000000003fffffffffffffffffffffffff
             )
             c1 := addmod(
                 c1,
-                0x40000000000008000000000001000000000000200000000000040000000000,
+                0x1fc00000400003f800000800007f00000100000fe00000200001fc0000040000,
                 0x800000000000000000000000000000000000003fffffffffffffffffffffffff
             )
-            c2 := addmod(
-                c2,
-                0x40000000000008000000000001000000000000200000000000040000000000,
-                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
-            )
-            let l0 := and(shr(0, c0), 0x7ffffffffffff)
-            let h0 := and(shr(0, c1), 0x7ffffffffffff)
-            let s0 := and(shr(0, c2), 0x7ffffffffffff)
             let r0 :=
                 mod(
-                    sub(
-                        add(add(add(l0, shl(16, s0)), shl(32, h0)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l0, h0))
+                    add(
+                        and(shr(0, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(0, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l1 := and(shr(51, c0), 0x7ffffffffffff)
-            let h1 := and(shr(51, c1), 0x7ffffffffffff)
-            let s1 := and(shr(51, c2), 0x7ffffffffffff)
             let r1 :=
                 mod(
-                    sub(
-                        add(add(add(l1, shl(16, s1)), shl(32, h1)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l1, h1))
+                    add(
+                        and(shr(51, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(51, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l2 := and(shr(102, c0), 0x7ffffffffffff)
-            let h2 := and(shr(102, c1), 0x7ffffffffffff)
-            let s2 := and(shr(102, c2), 0x7ffffffffffff)
             let r2 :=
                 mod(
-                    sub(
-                        add(add(add(l2, shl(16, s2)), shl(32, h2)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l2, h2))
+                    add(
+                        and(shr(102, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(102, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l3 := and(shr(153, c0), 0x7ffffffffffff)
-            let h3 := and(shr(153, c1), 0x7ffffffffffff)
-            let s3 := and(shr(153, c2), 0x7ffffffffffff)
             let r3 :=
                 mod(
-                    sub(
-                        add(add(add(l3, shl(16, s3)), shl(32, h3)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l3, h3))
+                    add(
+                        and(shr(153, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(153, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l4 := and(shr(204, c0), 0x7ffffffffffff)
-            let h4 := and(shr(204, c1), 0x7ffffffffffff)
-            let s4 := and(shr(204, c2), 0x7ffffffffffff)
             let r4 :=
                 mod(
-                    sub(
-                        add(add(add(l4, shl(16, s4)), shl(32, h4)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l4, h4))
+                    add(
+                        and(shr(204, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(204, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
@@ -1776,13 +2002,47 @@ library WhirVerifierUtils5 {
         c4 = (packed >> 96) & 0xffffffff;
     }
 
+    // A complemented pointer distinguishes the lazy descriptor from a matrix.
+    // Valid EVM allocations have bit 255 clear; complementing also works when a
+    // legacy caller leaves the free pointer unaligned. Never dereference a tag.
+    // The descriptor owns four initialized words: the borrowed
+    // immutable packed weights, generic matrix, quartet cache, and packed sum.
+    // The packed buffer must remain live and unchanged while this handle is used.
+    function _prepareRowWeightsLazy(uint256 packedPtr) internal pure returns (uint256 ptr) {
+        assembly ("memory-safe") {
+            let descriptor := mload(0x40)
+            mstore(0x40, add(descriptor, 128))
+            mstore(descriptor, packedPtr)
+            mstore(add(descriptor, 32), 0)
+            mstore(add(descriptor, 64), 0)
+            mstore(add(descriptor, 96), 0)
+            ptr := not(descriptor)
+        }
+    }
+
+    function _genericRowWeights(uint256 ptr) private pure returns (uint256 matrix) {
+        if ((ptr >> 255) == 0) return ptr;
+        uint256 packedPtr;
+        assembly ("memory-safe") {
+            ptr := not(ptr)
+            packedPtr := mload(ptr)
+            matrix := mload(add(ptr, 32))
+        }
+        if (matrix == 0) {
+            matrix = _prepareRowWeights(packedPtr);
+            assembly ("memory-safe") { mstore(add(ptr, 32), matrix) }
+        }
+    }
+
     function _prepareRowWeights(uint256 packedPtr) internal pure returns (uint256 ptr) {
         assembly ("memory-safe") {
             ptr := mload(0x40)
-            mstore(0x40, add(ptr, 1536))
+            mstore(0x40, add(ptr, 1088))
+            mstore(add(ptr, 1024), 0)
+            mstore(add(ptr, 1056), 0)
             for { let i := 0 } lt(i, 16) { i := add(i, 1) } {
                 let a := mload(add(packedPtr, shl(5, i)))
-                let dst := add(ptr, mul(i, 96))
+                let dst := add(ptr, mul(i, 64))
                 let u :=
                     or(
                         and(shr(224, a), 0xffffffff),
@@ -1797,74 +2057,347 @@ library WhirVerifierUtils5 {
                             )
                         )
                     )
-                let low := and(u, 0xffff000000001fffe000000003fffc000000007fff800000000ffff)
-                let high :=
-                    and(shr(16, u), 0xffff000000001fffe000000003fffc000000007fff800000000ffff)
-                mstore(dst, low)
-                mstore(add(dst, 32), high)
-                mstore(add(dst, 64), add(low, high))
-            }
-        }
-    }
-
-    function _prepareBaseRadix80(uint256 packedPtr) internal pure returns (uint256 ptr) {
-        assembly ("memory-safe") {
-            ptr := mload(0x40)
-            mstore(0x40, add(ptr, 0x400))
-            for { let i := 0 } lt(i, 16) { i := add(i, 1) } {
-                let w := mload(add(packedPtr, shl(5, i)))
-                let dst := add(ptr, shl(6, i))
-                mstore(
-                    dst,
-                    or(
-                        or(shr(224, w), shl(80, and(shr(192, w), 0xffffffff))),
-                        shl(160, and(shr(160, w), 0xffffffff))
-                    )
-                )
+                // Full radix51 coefficients and their high20-bit parts.
+                mstore(dst, u)
                 mstore(
                     add(dst, 32),
-                    or(and(shr(128, w), 0xffffffff), shl(80, and(shr(96, w), 0xffffffff)))
+                    and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff)
                 )
             }
         }
     }
 
-    function _dotBaseRadix80(uint256 weightsPtr, uint256 w0, uint256 w1)
+    function _evaluateConstantColumnRow(uint256 src, uint256 weightsPtr, uint256 common)
+        private
+        pure
+        returns (uint256)
+    {
+        (uint256 baseWeights, uint256 weightSum) = _constantRowWeights(weightsPtr);
+        uint256 w0;
+        uint256 w1;
+        assembly ("memory-safe") {
+            w0 := or(w0, shl(224, shr(224, calldataload(add(src, 0)))))
+            w0 := or(w0, shl(192, shr(224, calldataload(add(src, 20)))))
+            w0 := or(w0, shl(160, shr(224, calldataload(add(src, 40)))))
+            w0 := or(w0, shl(128, shr(224, calldataload(add(src, 60)))))
+            w0 := or(w0, shl(96, shr(224, calldataload(add(src, 80)))))
+            w0 := or(w0, shl(64, shr(224, calldataload(add(src, 100)))))
+            w0 := or(w0, shl(32, shr(224, calldataload(add(src, 120)))))
+            w0 := or(w0, shl(0, shr(224, calldataload(add(src, 140)))))
+            w1 := or(w1, shl(224, shr(224, calldataload(add(src, 160)))))
+            w1 := or(w1, shl(192, shr(224, calldataload(add(src, 180)))))
+            w1 := or(w1, shl(160, shr(224, calldataload(add(src, 200)))))
+            w1 := or(w1, shl(128, shr(224, calldataload(add(src, 220)))))
+            w1 := or(w1, shl(96, shr(224, calldataload(add(src, 240)))))
+            w1 := or(w1, shl(64, shr(224, calldataload(add(src, 260)))))
+            w1 := or(w1, shl(32, shr(224, calldataload(add(src, 280)))))
+            w1 := or(w1, shl(0, shr(224, calldataload(add(src, 300)))))
+        }
+        uint256 baseValue = _dotBaseRadix64(baseWeights, w0, w1);
+        return KoalaBearExt5.add(
+            baseValue,
+            weightSum == KoalaBearExt5.ONE ? common : KoalaBearExt5.mul(common, weightSum)
+        );
+    }
+
+    function _evaluateConstantColumnRowMemory(uint256 src, uint256 weightsPtr, uint256 common)
+        private
+        pure
+        returns (uint256)
+    {
+        (uint256 baseWeights, uint256 weightSum) = _constantRowWeights(weightsPtr);
+        uint256 w0;
+        uint256 w1;
+        assembly ("memory-safe") {
+            w0 := or(w0, shl(224, shr(224, mload(add(src, 0)))))
+            w0 := or(w0, shl(192, shr(224, mload(add(src, 20)))))
+            w0 := or(w0, shl(160, shr(224, mload(add(src, 40)))))
+            w0 := or(w0, shl(128, shr(224, mload(add(src, 60)))))
+            w0 := or(w0, shl(96, shr(224, mload(add(src, 80)))))
+            w0 := or(w0, shl(64, shr(224, mload(add(src, 100)))))
+            w0 := or(w0, shl(32, shr(224, mload(add(src, 120)))))
+            w0 := or(w0, shl(0, shr(224, mload(add(src, 140)))))
+            w1 := or(w1, shl(224, shr(224, mload(add(src, 160)))))
+            w1 := or(w1, shl(192, shr(224, mload(add(src, 180)))))
+            w1 := or(w1, shl(160, shr(224, mload(add(src, 200)))))
+            w1 := or(w1, shl(128, shr(224, mload(add(src, 220)))))
+            w1 := or(w1, shl(96, shr(224, mload(add(src, 240)))))
+            w1 := or(w1, shl(64, shr(224, mload(add(src, 260)))))
+            w1 := or(w1, shl(32, shr(224, mload(add(src, 280)))))
+            w1 := or(w1, shl(0, shr(224, mload(add(src, 300)))))
+        }
+        uint256 baseValue = _dotBaseRadix64(baseWeights, w0, w1);
+        return KoalaBearExt5.add(
+            baseValue,
+            weightSum == KoalaBearExt5.ONE ? common : KoalaBearExt5.mul(common, weightSum)
+        );
+    }
+
+    // Cache metadata stays at offsets 1024/1056 in the radix-2^51 weight matrix.
+    // The lazy cache stores five coordinates, each with four reversed quartets
+    // of canonical coefficients in 64-bit lanes: cache[4 * coordinate + group].
+    function _constantRowWeights(uint256 ptr)
+        private
+        pure
+        returns (uint256 baseWeights, uint256 weightSum)
+    {
+        if ((ptr >> 255) != 0) return _constantRowWeightsPacked(~ptr);
+        assembly ("memory-safe") {
+            baseWeights := mload(add(ptr, 1024))
+            weightSum := mload(add(ptr, 1056))
+            if iszero(baseWeights) {
+                baseWeights := mload(0x40)
+                mstore(0x40, add(baseWeights, 640))
+                let total := 0
+                for { let group := 0 } lt(group, 4) { group := add(group, 1) } {
+                    let src := add(ptr, shl(8, group))
+                    let w0 := mload(src)
+                    let w1 := mload(add(src, 64))
+                    let w2 := mload(add(src, 128))
+                    let w3 := mload(add(src, 192))
+                    total := add(total, add(add(w0, w1), add(w2, w3)))
+                    for { let c := 0 } lt(c, 5) { c := add(c, 1) } {
+                        let shift := mul(51, c)
+                        let w :=
+                            or(
+                                or(
+                                    and(shr(shift, w0), 0xffffffff),
+                                    shl(64, and(shr(shift, w1), 0xffffffff))
+                                ),
+                                or(
+                                    shl(128, and(shr(shift, w2), 0xffffffff)),
+                                    shl(192, and(shr(shift, w3), 0xffffffff))
+                                )
+                            )
+                        mstore(add(baseWeights, add(shl(7, c), shl(5, group))), w)
+                    }
+                }
+                // Summing sixteen radix51 canonical weights cannot carry:
+                // every lane is below 16*p < 2^35 < 2^51.
+                for { let c := 0 } lt(c, 5) { c := add(c, 1) } {
+                    weightSum := or(
+                        weightSum,
+                        shl(
+                            sub(224, shl(5, c)),
+                            mod(and(shr(mul(51, c), total), 0x7ffffffffffff), 0x7f000001)
+                        )
+                    )
+                }
+                mstore(add(ptr, 1024), baseWeights)
+                mstore(add(ptr, 1056), weightSum)
+            }
+        }
+    }
+
+    // Build only the representation needed by a constant-column row. Each
+    // coordinate sum is below 16*p < 2^35, so no packed-lane carry is involved.
+    // The arbitrary canonical weight sum is retained, including zero and ONE.
+    function _constantRowWeightsPacked(uint256 descriptor)
+        private
+        pure
+        returns (uint256 baseWeights, uint256 weightSum)
+    {
+        assembly ("memory-safe") {
+            baseWeights := mload(add(descriptor, 64))
+            weightSum := mload(add(descriptor, 96))
+            if iszero(baseWeights) {
+                baseWeights := mload(0x40)
+                mstore(0x40, add(baseWeights, 640))
+                let packedPtr := mload(descriptor)
+                for { let c := 0 } lt(c, 5) { c := add(c, 1) } {
+                    let shift := sub(224, shl(5, c))
+                    let total := 0
+                    for { let group := 0 } lt(group, 4) { group := add(group, 1) } {
+                        let src := add(packedPtr, shl(7, group))
+                        let w0 := and(shr(shift, mload(src)), 0xffffffff)
+                        let w1 := and(shr(shift, mload(add(src, 32))), 0xffffffff)
+                        let w2 := and(shr(shift, mload(add(src, 64))), 0xffffffff)
+                        let w3 := and(shr(shift, mload(add(src, 96))), 0xffffffff)
+                        total := add(total, add(add(w0, w1), add(w2, w3)))
+                        mstore(
+                            add(baseWeights, add(shl(7, c), shl(5, group))),
+                            or(or(w0, shl(64, w1)), or(shl(128, w2), shl(192, w3)))
+                        )
+                    }
+                    weightSum := or(weightSum, shl(shift, mod(total, 0x7f000001)))
+                }
+                mstore(add(descriptor, 64), baseWeights)
+                mstore(add(descriptor, 96), weightSum)
+            }
+        }
+    }
+
+    // Four-term reversed Kronecker dot products. Each convolution coefficient is
+    // at most 4*(p-1)^2 < 2^64. The top 64 bits of low-256 MUL therefore contain
+    // the exact four-term dot; no lower lane carries into it. Four group dots
+    // sum below 2^66 before the final modular reduction for each coordinate.
+    function _prepareBaseRadix64(uint256 packedPtr) internal pure returns (uint256 ptr) {
+        assembly ("memory-safe") {
+            ptr := mload(0x40)
+            mstore(0x40, add(ptr, 640))
+            for { let group := 0 } lt(group, 4) { group := add(group, 1) } {
+                let src := add(packedPtr, shl(7, group))
+                let w0 := mload(src)
+                let w1 := mload(add(src, 32))
+                let w2 := mload(add(src, 64))
+                let w3 := mload(add(src, 96))
+                for { let c := 0 } lt(c, 5) { c := add(c, 1) } {
+                    let shift := sub(224, shl(5, c))
+                    let w :=
+                        or(
+                            or(
+                                and(shr(shift, w0), 0xffffffff),
+                                shl(64, and(shr(shift, w1), 0xffffffff))
+                            ),
+                            or(
+                                shl(128, and(shr(shift, w2), 0xffffffff)),
+                                shl(192, and(shr(shift, w3), 0xffffffff))
+                            )
+                        )
+                    mstore(add(ptr, add(shl(7, c), shl(5, group))), w)
+                }
+            }
+        }
+    }
+
+    function _dotBaseRadix64(uint256 ptr, uint256 w0, uint256 w1)
         internal
         pure
         returns (uint256 out)
     {
         assembly ("memory-safe") {
-            let a := 0
-            let b := 0
-            function accumulate(s, w, ca, cb) -> aa, bb {
-                aa := add(ca, mul(s, mload(w)))
-                bb := add(cb, mul(s, mload(add(w, 32))))
-            }
-            a, b := accumulate(and(shr(224, w0), 0xffffffff), add(weightsPtr, 0), a, b)
-            a, b := accumulate(and(shr(192, w0), 0xffffffff), add(weightsPtr, 64), a, b)
-            a, b := accumulate(and(shr(160, w0), 0xffffffff), add(weightsPtr, 128), a, b)
-            a, b := accumulate(and(shr(128, w0), 0xffffffff), add(weightsPtr, 192), a, b)
-            a, b := accumulate(and(shr(96, w0), 0xffffffff), add(weightsPtr, 256), a, b)
-            a, b := accumulate(and(shr(64, w0), 0xffffffff), add(weightsPtr, 320), a, b)
-            a, b := accumulate(and(shr(32, w0), 0xffffffff), add(weightsPtr, 384), a, b)
-            a, b := accumulate(and(shr(0, w0), 0xffffffff), add(weightsPtr, 448), a, b)
-            a, b := accumulate(and(shr(224, w1), 0xffffffff), add(weightsPtr, 512), a, b)
-            a, b := accumulate(and(shr(192, w1), 0xffffffff), add(weightsPtr, 576), a, b)
-            a, b := accumulate(and(shr(160, w1), 0xffffffff), add(weightsPtr, 640), a, b)
-            a, b := accumulate(and(shr(128, w1), 0xffffffff), add(weightsPtr, 704), a, b)
-            a, b := accumulate(and(shr(96, w1), 0xffffffff), add(weightsPtr, 768), a, b)
-            a, b := accumulate(and(shr(64, w1), 0xffffffff), add(weightsPtr, 832), a, b)
-            a, b := accumulate(and(shr(32, w1), 0xffffffff), add(weightsPtr, 896), a, b)
-            a, b := accumulate(and(shr(0, w1), 0xffffffff), add(weightsPtr, 960), a, b)
-            let M := 0x7f000001
-            let mask := sub(shl(80, 1), 1)
+            // Keep the four fixed spreads explicit: a Yul helper remains four
+            // runtime calls under the selected optimizer and adds stack traffic.
+            let s0 := and(shr(128, w0), 0xffffffffffffffffffffffffffffffff)
+            s0 := and(
+                or(s0, shl(64, s0)),
+                0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff
+            )
+            s0 := and(
+                or(s0, shl(32, s0)),
+                0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff
+            )
+            let s1 := and(w0, 0xffffffffffffffffffffffffffffffff)
+            s1 := and(
+                or(s1, shl(64, s1)),
+                0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff
+            )
+            s1 := and(
+                or(s1, shl(32, s1)),
+                0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff
+            )
+            let s2 := and(shr(128, w1), 0xffffffffffffffffffffffffffffffff)
+            s2 := and(
+                or(s2, shl(64, s2)),
+                0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff
+            )
+            s2 := and(
+                or(s2, shl(32, s2)),
+                0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff
+            )
+            let s3 := and(w1, 0xffffffffffffffffffffffffffffffff)
+            s3 := and(
+                or(s3, shl(64, s3)),
+                0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff
+            )
+            s3 := and(
+                or(s3, shl(32, s3)),
+                0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff
+            )
             out := or(
-                or(
-                    or(shl(224, mod(and(a, mask), M)), shl(192, mod(and(shr(80, a), mask), M))),
-                    shl(160, mod(shr(160, a), M))
-                ),
-                or(shl(128, mod(and(b, mask), M)), shl(96, mod(shr(80, b), M)))
+                out,
+                shl(
+                    224,
+                    mod(
+                        add(
+                            add(
+                                shr(192, mul(s0, mload(add(ptr, 0)))),
+                                shr(192, mul(s1, mload(add(ptr, 32))))
+                            ),
+                            add(
+                                shr(192, mul(s2, mload(add(ptr, 64)))),
+                                shr(192, mul(s3, mload(add(ptr, 96))))
+                            )
+                        ),
+                        0x7f000001
+                    )
+                )
+            )
+            out := or(
+                out,
+                shl(
+                    192,
+                    mod(
+                        add(
+                            add(
+                                shr(192, mul(s0, mload(add(ptr, 128)))),
+                                shr(192, mul(s1, mload(add(ptr, 160))))
+                            ),
+                            add(
+                                shr(192, mul(s2, mload(add(ptr, 192)))),
+                                shr(192, mul(s3, mload(add(ptr, 224))))
+                            )
+                        ),
+                        0x7f000001
+                    )
+                )
+            )
+            out := or(
+                out,
+                shl(
+                    160,
+                    mod(
+                        add(
+                            add(
+                                shr(192, mul(s0, mload(add(ptr, 256)))),
+                                shr(192, mul(s1, mload(add(ptr, 288))))
+                            ),
+                            add(
+                                shr(192, mul(s2, mload(add(ptr, 320)))),
+                                shr(192, mul(s3, mload(add(ptr, 352))))
+                            )
+                        ),
+                        0x7f000001
+                    )
+                )
+            )
+            out := or(
+                out,
+                shl(
+                    128,
+                    mod(
+                        add(
+                            add(
+                                shr(192, mul(s0, mload(add(ptr, 384)))),
+                                shr(192, mul(s1, mload(add(ptr, 416))))
+                            ),
+                            add(
+                                shr(192, mul(s2, mload(add(ptr, 448)))),
+                                shr(192, mul(s3, mload(add(ptr, 480))))
+                            )
+                        ),
+                        0x7f000001
+                    )
+                )
+            )
+            out := or(
+                out,
+                shl(
+                    96,
+                    mod(
+                        add(
+                            add(
+                                shr(192, mul(s0, mload(add(ptr, 512)))),
+                                shr(192, mul(s1, mload(add(ptr, 544))))
+                            ),
+                            add(
+                                shr(192, mul(s2, mload(add(ptr, 576)))),
+                                shr(192, mul(s3, mload(add(ptr, 608))))
+                            )
+                        ),
+                        0x7f000001
+                    )
+                )
             )
         }
     }
@@ -1874,13 +2407,45 @@ library WhirVerifierUtils5 {
         pure
         returns (uint256 out)
     {
+        // Final coefficients were canonically validated while observing the
+        // transcript. This optional specialization changes only their dot product.
+        uint256 src;
+        uint256 common;
+        bool commonColumns;
         assembly ("memory-safe") {
-            let src := add(blob.offset, offset)
+            src := add(blob.offset, offset)
+            let first := calldataload(src)
+            let mask := 0x00000000ffffffffffffffffffffffffffffffff000000000000000000000000
+            commonColumns := iszero(and(xor(first, calldataload(add(src, 20))), mask))
+            if commonColumns {
+                let different := 0
+                different := or(different, xor(first, calldataload(add(src, 40))))
+                different := or(different, xor(first, calldataload(add(src, 60))))
+                different := or(different, xor(first, calldataload(add(src, 80))))
+                different := or(different, xor(first, calldataload(add(src, 100))))
+                different := or(different, xor(first, calldataload(add(src, 120))))
+                different := or(different, xor(first, calldataload(add(src, 140))))
+                different := or(different, xor(first, calldataload(add(src, 160))))
+                different := or(different, xor(first, calldataload(add(src, 180))))
+                different := or(different, xor(first, calldataload(add(src, 200))))
+                different := or(different, xor(first, calldataload(add(src, 220))))
+                different := or(different, xor(first, calldataload(add(src, 240))))
+                different := or(different, xor(first, calldataload(add(src, 260))))
+                different := or(different, xor(first, calldataload(add(src, 280))))
+                different := or(different, xor(first, calldataload(add(src, 300))))
+                commonColumns := iszero(and(different, mask))
+            }
+            common := and(first, mask)
+        }
+        if (commonColumns) {
+            return _evaluateConstantColumnRow(src, weightsPtr, common);
+        }
+        weightsPtr = _genericRowWeights(weightsPtr);
+        assembly ("memory-safe") {
             let M := 0x7f000001
             let c0 := 0
             let c1 := 0
-            let c2 := 0
-            function accumulate(a, w, d0, d1, d2) -> e0, e1, e2 {
+            function accumulate(a, b, w, d0, d1) -> e0, e1 {
                 let u :=
                     or(
                         and(shr(224, a), 0xffffffff),
@@ -1895,13 +2460,10 @@ library WhirVerifierUtils5 {
                             )
                         )
                     )
-                let low := and(u, 0xffff000000001fffe000000003fffc000000007fff800000000ffff)
-                let high :=
-                    and(shr(16, u), 0xffff000000001fffe000000003fffc000000007fff800000000ffff)
                 e0 := addmod(
                     d0,
                     mulmod(
-                        low,
+                        u,
                         mload(w),
                         0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                     ),
@@ -1910,218 +2472,374 @@ library WhirVerifierUtils5 {
                 e1 := addmod(
                     d1,
                     mulmod(
-                        high,
+                        and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff),
                         mload(add(w, 32)),
                         0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                     ),
                     0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                 )
-                e2 := addmod(
-                    d2,
+
+                u := or(
+                    and(shr(224, b), 0xffffffff),
+                    or(
+                        shl(51, and(shr(192, b), 0xffffffff)),
+                        or(
+                            shl(102, and(shr(160, b), 0xffffffff)),
+                            or(
+                                shl(153, and(shr(128, b), 0xffffffff)),
+                                shl(204, and(shr(96, b), 0xffffffff))
+                            )
+                        )
+                    )
+                )
+                e0 := addmod(
+                    e0,
                     mulmod(
-                        add(low, high),
+                        u,
                         mload(add(w, 64)),
                         0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                     ),
                     0x800000000000000000000000000000000000003fffffffffffffffffffffffff
                 )
+                e1 := addmod(
+                    e1,
+                    mulmod(
+                        and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff),
+                        mload(add(w, 96)),
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    ),
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                )
             }
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 0)), not(sub(shl(96, 1), 1))),
+                calldataload(add(src, 0)),
+                calldataload(add(src, 20)),
                 add(weightsPtr, 0),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 20)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 96),
+                calldataload(add(src, 40)),
+                calldataload(add(src, 60)),
+                add(weightsPtr, 128),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 40)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 192),
+                calldataload(add(src, 80)),
+                calldataload(add(src, 100)),
+                add(weightsPtr, 256),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 60)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 288),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 80)), not(sub(shl(96, 1), 1))),
+                calldataload(add(src, 120)),
+                calldataload(add(src, 140)),
                 add(weightsPtr, 384),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 100)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 480),
+                calldataload(add(src, 160)),
+                calldataload(add(src, 180)),
+                add(weightsPtr, 512),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 120)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 576),
+                calldataload(add(src, 200)),
+                calldataload(add(src, 220)),
+                add(weightsPtr, 640),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 140)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 672),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 160)), not(sub(shl(96, 1), 1))),
+                calldataload(add(src, 240)),
+                calldataload(add(src, 260)),
                 add(weightsPtr, 768),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
+            c0, c1 :=
                 accumulate(
-                and(calldataload(add(src, 180)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 864),
+                calldataload(add(src, 280)),
+                calldataload(add(src, 300)),
+                add(weightsPtr, 896),
                 c0,
-                c1,
-                c2
+                c1
             )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 200)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 960),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 220)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 1056),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 240)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 1152),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 260)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 1248),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 280)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 1344),
-                c0,
-                c1,
-                c2
-            )
-            c0, c1, c2 :=
-                accumulate(
-                and(calldataload(add(src, 300)), not(sub(shl(96, 1), 1))),
-                add(weightsPtr, 1440),
-                c0,
-                c1,
-                c2
-            )
-            let bias := shl(80, M)
+            // Full/high products obey polynomial reduction modulo N=Q^5+Q^2-1.
+            // Subtracting the high20-bit product times2^22 leaves low11-bit
+            // cross terms. Per term R<=8723116322817. Across16products, each
+            // reduced coefficient lies in[-64R,96R]. B=P*2^18 makes both this
+            // remainder and the high-product digits strictly within[0,Q),Q=2^51.
+            // Recombination modulo P cancels B; no radix carry information is lost.
             c0 := addmod(
                 c0,
-                0x40000000000008000000000001000000000000200000000000040000000000,
+                sub(
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff,
+                    mulmod(
+                        c1,
+                        0x400000,
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    )
+                ),
+                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+            )
+            c0 := addmod(
+                c0,
+                0x1fc00000400003f800000800007f00000100000fe00000200001fc0000040000,
                 0x800000000000000000000000000000000000003fffffffffffffffffffffffff
             )
             c1 := addmod(
                 c1,
-                0x40000000000008000000000001000000000000200000000000040000000000,
+                0x1fc00000400003f800000800007f00000100000fe00000200001fc0000040000,
                 0x800000000000000000000000000000000000003fffffffffffffffffffffffff
             )
-            c2 := addmod(
-                c2,
-                0x40000000000008000000000001000000000000200000000000040000000000,
-                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
-            )
-            let l0 := and(shr(0, c0), 0x7ffffffffffff)
-            let h0 := and(shr(0, c1), 0x7ffffffffffff)
-            let s0 := and(shr(0, c2), 0x7ffffffffffff)
             let r0 :=
                 mod(
-                    sub(
-                        add(add(add(l0, shl(16, s0)), shl(32, h0)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l0, h0))
+                    add(
+                        and(shr(0, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(0, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l1 := and(shr(51, c0), 0x7ffffffffffff)
-            let h1 := and(shr(51, c1), 0x7ffffffffffff)
-            let s1 := and(shr(51, c2), 0x7ffffffffffff)
             let r1 :=
                 mod(
-                    sub(
-                        add(add(add(l1, shl(16, s1)), shl(32, h1)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l1, h1))
+                    add(
+                        and(shr(51, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(51, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l2 := and(shr(102, c0), 0x7ffffffffffff)
-            let h2 := and(shr(102, c1), 0x7ffffffffffff)
-            let s2 := and(shr(102, c2), 0x7ffffffffffff)
             let r2 :=
                 mod(
-                    sub(
-                        add(add(add(l2, shl(16, s2)), shl(32, h2)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l2, h2))
+                    add(
+                        and(shr(102, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(102, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l3 := and(shr(153, c0), 0x7ffffffffffff)
-            let h3 := and(shr(153, c1), 0x7ffffffffffff)
-            let s3 := and(shr(153, c2), 0x7ffffffffffff)
             let r3 :=
                 mod(
-                    sub(
-                        add(add(add(l3, shl(16, s3)), shl(32, h3)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l3, h3))
+                    add(
+                        and(shr(153, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(153, c1), 0x7ffffffffffff))
                     ),
                     M
                 )
-            let l4 := and(shr(204, c0), 0x7ffffffffffff)
-            let h4 := and(shr(204, c1), 0x7ffffffffffff)
-            let s4 := and(shr(204, c2), 0x7ffffffffffff)
             let r4 :=
                 mod(
-                    sub(
-                        add(add(add(l4, shl(16, s4)), shl(32, h4)), 0x7efffc0103fffc0000000000),
-                        shl(16, add(l4, h4))
+                    add(
+                        and(shr(204, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(204, c1), 0x7ffffffffffff))
+                    ),
+                    M
+                )
+            out := or(
+                shl(224, r0),
+                or(shl(192, r1), or(shl(160, r2), or(shl(128, r3), shl(96, r4))))
+            )
+        }
+    }
+
+    function _evaluateFinalRow16Memory(bytes memory blob, uint256 offset, uint256 weightsPtr)
+        private
+        pure
+        returns (uint256 out)
+    {
+        // Final coefficients were canonically validated while observing the
+        // transcript. This optional specialization changes only their dot product.
+        uint256 src;
+        uint256 common;
+        bool commonColumns;
+        assembly ("memory-safe") {
+            src := add(add(blob, 32), offset)
+            let first := mload(src)
+            let mask := 0x00000000ffffffffffffffffffffffffffffffff000000000000000000000000
+            commonColumns := iszero(and(xor(first, mload(add(src, 20))), mask))
+            if commonColumns {
+                let different := 0
+                different := or(different, xor(first, mload(add(src, 40))))
+                different := or(different, xor(first, mload(add(src, 60))))
+                different := or(different, xor(first, mload(add(src, 80))))
+                different := or(different, xor(first, mload(add(src, 100))))
+                different := or(different, xor(first, mload(add(src, 120))))
+                different := or(different, xor(first, mload(add(src, 140))))
+                different := or(different, xor(first, mload(add(src, 160))))
+                different := or(different, xor(first, mload(add(src, 180))))
+                different := or(different, xor(first, mload(add(src, 200))))
+                different := or(different, xor(first, mload(add(src, 220))))
+                different := or(different, xor(first, mload(add(src, 240))))
+                different := or(different, xor(first, mload(add(src, 260))))
+                different := or(different, xor(first, mload(add(src, 280))))
+                different := or(different, xor(first, mload(add(src, 300))))
+                commonColumns := iszero(and(different, mask))
+            }
+            common := and(first, mask)
+        }
+        if (commonColumns) {
+            return _evaluateConstantColumnRowMemory(src, weightsPtr, common);
+        }
+        weightsPtr = _genericRowWeights(weightsPtr);
+        assembly ("memory-safe") {
+            let M := 0x7f000001
+            let c0 := 0
+            let c1 := 0
+            function accumulate(a, b, w, d0, d1) -> e0, e1 {
+                let u :=
+                    or(
+                        and(shr(224, a), 0xffffffff),
+                        or(
+                            shl(51, and(shr(192, a), 0xffffffff)),
+                            or(
+                                shl(102, and(shr(160, a), 0xffffffff)),
+                                or(
+                                    shl(153, and(shr(128, a), 0xffffffff)),
+                                    shl(204, and(shr(96, a), 0xffffffff))
+                                )
+                            )
+                        )
+                    )
+                e0 := addmod(
+                    d0,
+                    mulmod(
+                        u,
+                        mload(w),
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    ),
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                )
+                e1 := addmod(
+                    d1,
+                    mulmod(
+                        and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff),
+                        mload(add(w, 32)),
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    ),
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                )
+
+                u := or(
+                    and(shr(224, b), 0xffffffff),
+                    or(
+                        shl(51, and(shr(192, b), 0xffffffff)),
+                        or(
+                            shl(102, and(shr(160, b), 0xffffffff)),
+                            or(
+                                shl(153, and(shr(128, b), 0xffffffff)),
+                                shl(204, and(shr(96, b), 0xffffffff))
+                            )
+                        )
+                    )
+                )
+                e0 := addmod(
+                    e0,
+                    mulmod(
+                        u,
+                        mload(add(w, 64)),
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    ),
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                )
+                e1 := addmod(
+                    e1,
+                    mulmod(
+                        and(shr(11, u), 0xfffff00000001ffffe00000003ffffc00000007ffff80000000fffff),
+                        mload(add(w, 96)),
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    ),
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                )
+            }
+            c0, c1 :=
+                accumulate(mload(add(src, 0)), mload(add(src, 20)), add(weightsPtr, 0), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 40)), mload(add(src, 60)), add(weightsPtr, 128), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 80)), mload(add(src, 100)), add(weightsPtr, 256), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 120)), mload(add(src, 140)), add(weightsPtr, 384), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 160)), mload(add(src, 180)), add(weightsPtr, 512), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 200)), mload(add(src, 220)), add(weightsPtr, 640), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 240)), mload(add(src, 260)), add(weightsPtr, 768), c0, c1)
+            c0, c1 :=
+                accumulate(mload(add(src, 280)), mload(add(src, 300)), add(weightsPtr, 896), c0, c1)
+            // Full/high products obey polynomial reduction modulo N=Q^5+Q^2-1.
+            // Subtracting the high20-bit product times2^22 leaves low11-bit
+            // cross terms. Per term R<=8723116322817. Across16products, each
+            // reduced coefficient lies in[-64R,96R]. B=P*2^18 makes both this
+            // remainder and the high-product digits strictly within[0,Q),Q=2^51.
+            // Recombination modulo P cancels B; no radix carry information is lost.
+            c0 := addmod(
+                c0,
+                sub(
+                    0x800000000000000000000000000000000000003fffffffffffffffffffffffff,
+                    mulmod(
+                        c1,
+                        0x400000,
+                        0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+                    )
+                ),
+                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+            )
+            c0 := addmod(
+                c0,
+                0x1fc00000400003f800000800007f00000100000fe00000200001fc0000040000,
+                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+            )
+            c1 := addmod(
+                c1,
+                0x1fc00000400003f800000800007f00000100000fe00000200001fc0000040000,
+                0x800000000000000000000000000000000000003fffffffffffffffffffffffff
+            )
+            let r0 :=
+                mod(
+                    add(
+                        and(shr(0, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(0, c1), 0x7ffffffffffff))
+                    ),
+                    M
+                )
+            let r1 :=
+                mod(
+                    add(
+                        and(shr(51, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(51, c1), 0x7ffffffffffff))
+                    ),
+                    M
+                )
+            let r2 :=
+                mod(
+                    add(
+                        and(shr(102, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(102, c1), 0x7ffffffffffff))
+                    ),
+                    M
+                )
+            let r3 :=
+                mod(
+                    add(
+                        and(shr(153, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(153, c1), 0x7ffffffffffff))
+                    ),
+                    M
+                )
+            let r4 :=
+                mod(
+                    add(
+                        and(shr(204, c0), 0x7ffffffffffff),
+                        shl(22, and(shr(204, c1), 0x7ffffffffffff))
                     ),
                     M
                 )

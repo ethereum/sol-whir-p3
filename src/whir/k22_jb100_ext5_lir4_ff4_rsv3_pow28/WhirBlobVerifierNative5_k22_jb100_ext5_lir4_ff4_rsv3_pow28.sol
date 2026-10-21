@@ -9,11 +9,21 @@ import { KeccakChallenger } from "../../transcript/KeccakChallenger.sol";
 import { WhirBlobCodec5 } from "./WhirBlobCodec5_k22_jb100_ext5_lir4_ff4_rsv3_pow28.sol";
 import { WhirVerifierCore5 } from "./WhirVerifierCore5.sol";
 import { WhirVerifierUtils5 } from "./WhirVerifierUtils5.sol";
+import { QuinticTransportCodec } from "./QuinticTransportCodec.sol";
 
 contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
     using KeccakChallenger for KeccakChallenger.State;
 
-    function _validateHeaderNative(bytes calldata blob)
+    /// @notice Verify a WHRC envelope with raw or structured quintic proof rows.
+    function verifyCompressed(bytes32 expectedCommitment, bytes calldata encoded)
+        external
+        pure
+        returns (bool valid)
+    {
+        return _verifyDispatched(expectedCommitment, encoded);
+    }
+
+    function _validateHeaderNative(bytes calldata blob, bool compact)
         private
         pure
         returns (
@@ -51,7 +61,8 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
         if (magic != WhirBlobCodec5.MAGIC) {
             revert WhirBlobCodec5.BlobMagicMismatch();
         }
-        if (version != WhirBlobCodec5.VERSION) {
+        // 0x0101 is a reversible depth-first sibling-order transport.
+        if (version != WhirBlobCodec5.VERSION && version != 0x0101) {
             revert WhirBlobCodec5.BlobVersionMismatch();
         }
         if (digestBytes != WhirBlobCodec5.EFFECTIVE_DIGEST_BYTES) {
@@ -71,18 +82,41 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
             * 4 + round0DecommLen * 20 + 8 * 20 + 4 * 4 + 20 + 20 + 4 + 31 * 16 * 20
             + round1DecommLen * 20 + 8 * 20 + 4 * 4 + 20 + 20 + 4 + 19 * 16 * 20 + round2DecommLen
             * 20 + 8 * 20 + 4 * 4 + 64 * 20 + 4 + 14 * 16 * 20 + finalDecommLen * 20 + 12 * 20;
-        if (blob.length != expectedLen) {
+        if (!compact && blob.length != expectedLen) {
             revert WhirBlobCodec5.BlobLengthMismatch();
         }
     }
 
     function verify(bytes32 expectedCommitment, bytes calldata blob) external pure returns (bool) {
+        return _verifyDispatched(expectedCommitment, blob);
+    }
+
+    function _verifyDispatched(bytes32 expectedCommitment, bytes calldata input)
+        private
+        pure
+        returns (bool)
+    {
+        // Both public APIs share one runtime verifier. Inspect the envelope only
+        // for its explicit selector; blob contents cannot opt into another mode.
+        bool compact;
+        bytes calldata blob = input;
+        if (msg.sig == this.verifyCompressed.selector) {
+            (blob, compact) = QuinticTransportCodec.inspect(input);
+        }
+        return _verify(expectedCommitment, blob, compact);
+    }
+
+    function _verify(bytes32 expectedCommitment, bytes calldata blob, bool compact)
+        private
+        pure
+        returns (bool)
+    {
         (
             uint256 round0DecommLen,
             uint256 round1DecommLen,
             uint256 round2DecommLen,
             uint256 finalDecommLen
-        ) = _validateHeaderNative(blob);
+        ) = _validateHeaderNative(blob, compact);
 
         uint256 offset = WhirBlobCodec5.HEADER_BYTES;
         KeccakChallenger.State memory challenger;
@@ -156,7 +190,7 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
 
             uint256 round0Contribution;
             (round0ConstraintChallenge, round0Contribution, round0SelVars, offset) =
-                WhirVerifierCore5._verifyRoundStirAndCombineConstraintBlob(
+                WhirVerifierCore5._verifyRoundStirAndCombineConstraintBlobTransport(
                     challenger,
                     prevRoot,
                     blob,
@@ -172,7 +206,8 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
                     22,
                     542_991_299,
                     0,
-                    38 * 16 * 4
+                    38 * 16 * 4,
+                    compact
                 );
             claimedEval = KoalaBearExt5.add(claimedEval, round0Contribution);
 
@@ -196,7 +231,7 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
 
             uint256 round1Contribution;
             (round1ConstraintChallenge, round1Contribution, round1SelVars, offset) =
-                WhirVerifierCore5._verifyRoundStirAndCombineConstraintBlob(
+                WhirVerifierCore5._verifyRoundStirAndCombineConstraintBlobTransport(
                     challenger,
                     prevRoot,
                     blob,
@@ -212,7 +247,8 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
                     19,
                     339_671_193,
                     1,
-                    31 * 16 * 20
+                    31 * 16 * 20,
+                    compact
                 );
             claimedEval = KoalaBearExt5.add(claimedEval, round1Contribution);
 
@@ -236,7 +272,7 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
 
             uint256 round2Contribution;
             (round2ConstraintChallenge, round2Contribution, round2SelVars, offset) =
-                WhirVerifierCore5._verifyRoundStirAndCombineConstraintBlob(
+                WhirVerifierCore5._verifyRoundStirAndCombineConstraintBlobTransport(
                     challenger,
                     prevRoot,
                     blob,
@@ -252,7 +288,8 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
                     18,
                     1_816_824_389,
                     1,
-                    19 * 16 * 20
+                    19 * 16 * 20,
+                    compact
                 );
             claimedEval = KoalaBearExt5.add(claimedEval, round2Contribution);
 
@@ -264,13 +301,19 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
         }
 
         uint256 finalPolyOffset = offset;
-        unchecked {
-            for (uint256 i = 0; i < QuinticWhirFixedConfig.FINAL_POLY_LENGTH; i += 2) {
-                uint256 coeff0;
-                uint256 coeff1;
-                (coeff0, offset) = WhirBlobCodec5.readExt5(blob, offset);
-                (coeff1, offset) = WhirBlobCodec5.readExt5(blob, offset);
-                challenger.observeValidatedPackedExt5Pair(coeff0, coeff1);
+        bytes memory finalPolyMemory;
+        if (compact) {
+            (finalPolyMemory, offset) = QuinticTransportCodec.decodePolynomial(blob, offset);
+            challenger.observeValidatedPackedExt5Memory64(finalPolyMemory);
+        } else {
+            unchecked {
+                for (uint256 i = 0; i < QuinticWhirFixedConfig.FINAL_POLY_LENGTH; i += 2) {
+                    uint256 coeff0;
+                    uint256 coeff1;
+                    (coeff0, offset) = WhirBlobCodec5.readExt5(blob, offset);
+                    (coeff1, offset) = WhirBlobCodec5.readExt5(blob, offset);
+                    challenger.observeValidatedPackedExt5Pair(coeff0, coeff1);
+                }
             }
         }
 
@@ -279,17 +322,21 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
             offset += 4;
         }
 
-        offset = WhirVerifierCore5._verifyFinalStirChallengesBlobFixed(
-            challenger,
-            prevRoot,
-            blob,
-            offset,
-            finalDecommLen,
-            finalPowWitnessOffset,
-            allRandomness,
-            finalStirRandomnessOffset,
-            finalPolyOffset
-        );
+        uint256 finalPolynomialCache;
+        (offset, finalPolynomialCache) =
+            WhirVerifierCore5._verifyFinalStirChallengesBlobFixedTransportCached(
+                challenger,
+                prevRoot,
+                blob,
+                offset,
+                finalDecommLen,
+                finalPowWitnessOffset,
+                allRandomness,
+                finalStirRandomnessOffset,
+                finalPolyOffset,
+                compact,
+                finalPolyMemory
+            );
 
         uint256 finalSumcheckStart = randomnessCursor;
         (claimedEval, randomnessCursor, offset) = WhirVerifierCore5._verifySumcheckBlob6NoPow(
@@ -299,6 +346,26 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
         if (randomnessCursor != QuinticWhirFixedConfig.NUM_VARIABLES) {
             revert WhirVerifierCore5.RandomnessLengthMismatch(
                 QuinticWhirFixedConfig.NUM_VARIABLES, randomnessCursor
+            );
+        }
+
+        // Evaluate the final MLE after sumcheck so its retained cache and
+        // polynomial temporaries leave scope before the constraint checks.
+        (bool reusedFinalPolynomial, uint256 finalValue) = WhirVerifierUtils5.evaluateFinalValueHornerCache64Dim6(
+            finalPolynomialCache, allRandomness, finalSumcheckStart
+        );
+        if (!reusedFinalPolynomial && compact) {
+            finalValue = WhirVerifierUtils5.evaluateFinalValueMemory64Dim6(
+                finalPolyMemory, 0, allRandomness, finalSumcheckStart
+            );
+        } else if (!reusedFinalPolynomial) {
+            finalValue = WhirVerifierCore5._evaluateFinalValueBlob(
+                blob,
+                finalPolyOffset,
+                QuinticWhirFixedConfig.FINAL_POLY_LENGTH,
+                allRandomness,
+                finalSumcheckStart,
+                QuinticWhirFixedConfig.FINAL_SUMCHECK_ROUNDS
             );
         }
 
@@ -339,19 +406,12 @@ contract WhirBlobVerifierNative5_k22_jb100_ext5_lir4_ff4_rsv3_pow28 {
                 round2ConstraintChallenge, round2Eq, round2SelVars, packedPoint
             )
         );
-        uint256 finalValue = WhirVerifierCore5._evaluateFinalValueBlob(
-            blob,
-            finalPolyOffset,
-            QuinticWhirFixedConfig.FINAL_POLY_LENGTH,
-            allRandomness,
-            finalSumcheckStart,
-            QuinticWhirFixedConfig.FINAL_SUMCHECK_ROUNDS
-        );
         uint256 expected = KoalaBearExt5.mul(evaluationOfWeights, finalValue);
         if (claimedEval != expected) {
             revert WhirVerifierCore5.FinalConstraintMismatch(expected, claimedEval);
         }
 
+        if (offset != blob.length) revert QuinticTransportCodec.InvalidTransportEncoding();
         return true;
     }
 }

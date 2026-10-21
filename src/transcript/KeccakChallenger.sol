@@ -286,6 +286,64 @@ library KeccakChallenger {
         self.outputIndex = 0;
     }
 
+    /// @dev Fixed-size compact final polynomial: 64 contiguous big-endian Ext5 values.
+    /// All 320 limbs are canonical-checked; all reads/writes stay inside their logical slices.
+    function observeValidatedPackedExt5Memory64(State memory self, bytes memory values)
+        internal
+        pure
+    {
+        require(values.length == 1280, "BULK_EXT5_LENGTH");
+        uint256 oldLen = self.inputLen;
+        uint256 newLen = oldLen + 1280;
+        // Preserve the pair observer's capacity growth bound.
+        _ensureCapacity(self, newLen + 24);
+        bytes memory buffer = self.inputBuffer;
+        assembly ("memory-safe") {
+            function revertFirstInvalid(word, src, base) {
+                // This slow path runs only on rejection. Recover the exact first invalid
+                // packed extension, including fields split across adjacent 32-byte loads.
+                for { let limb := 0 } lt(limb, 8) { limb := add(limb, 1) } {
+                    let value := and(shr(sub(224, shl(5, limb)), word), 0xffffffff)
+                    if iszero(lt(value, 0x7f000001)) {
+                        let offset := mul(div(add(sub(src, base), shl(2, limb)), 20), 20)
+                        let packed
+                        switch offset
+                        case 1260 { packed := shl(96, mload(add(base, 1248))) }
+                        default {
+                            packed := and(mload(add(base, offset)), not(sub(shl(96, 1), 1)))
+                        }
+                        mstore(0x00, shl(224, 0xd53cfe5c))
+                        mstore(0x04, packed)
+                        revert(0x00, 0x24)
+                    }
+                }
+            }
+            let highBits := 0x8000000080000000800000008000000080000000800000008000000080000000
+            let low31 := 0x7fffffff7fffffff7fffffff7fffffff7fffffff7fffffff7fffffff7fffffff
+            let bias := 0x00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff00ffffff
+            let evenBytes := 0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff
+            let halfwords := 0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff
+            let base := add(values, 32)
+            let end := add(base, 1280)
+            let dst := add(add(buffer, 32), oldLen)
+            for { let src := base } lt(src, end) {
+                src := add(src, 32)
+                dst := add(dst, 32)
+            } {
+                let word := mload(src)
+                // Each masked lane + bias is below 2^32, so no carry crosses a limb.
+                // Bit 31 is set exactly when the original limb is >= 0x7f000001.
+                if or(and(word, highBits), and(add(and(word, low31), bias), highBits)) {
+                    revertFirstInvalid(word, src, base)
+                }
+                let swapped := or(shl(8, and(word, evenBytes)), and(shr(8, word), evenBytes))
+                mstore(dst, or(shl(16, and(swapped, halfwords)), and(shr(16, swapped), halfwords)))
+            }
+        }
+        self.inputLen = newLen;
+        self.outputIndex = 0;
+    }
+
     function observeValidatedPackedExt5Pair(State memory self, uint256 first, uint256 second)
         internal
         pure
@@ -295,20 +353,13 @@ library KeccakChallenger {
         _ensureCapacity(self, newLen + 24);
         bytes memory buffer = self.inputBuffer;
         assembly ("memory-safe") {
-            function bswap32(x) -> y {
-                y := or(
-                    or(shl(24, and(x, 0xff)), shl(8, and(x, 0xff00))),
-                    or(shr(8, and(x, 0xff0000)), shr(24, and(x, 0xff000000)))
-                )
-            }
-
             function revertPacked(x) {
                 mstore(0x00, shl(224, 0xd53cfe5c))
                 mstore(0x04, x)
                 revert(0x00, 0x24)
             }
 
-            function validateAndEncode(x, mask) -> encoded {
+            function validateAndEncode(x) -> encoded {
                 let highBitMask :=
                     0x8000000080000000800000008000000080000000000000000000000000000000
                 let low31Mask := 0x7fffffff7fffffff7fffffff7fffffff7fffffff000000000000000000000000
@@ -318,25 +369,16 @@ library KeccakChallenger {
                     and(add(and(x, low31Mask), bias), highBitMask)
                 ) { revertPacked(x) }
 
-                let x0 := shr(224, x)
-                let x1 := and(shr(192, x), mask)
-                let x2 := and(shr(160, x), mask)
-                let x3 := and(shr(128, x), mask)
-                let x4 := and(shr(96, x), mask)
-
-                encoded := or(
-                    or(
-                        or(shl(224, bswap32(x0)), shl(192, bswap32(x1))),
-                        or(shl(160, bswap32(x2)), shl(128, bswap32(x3)))
-                    ),
-                    shl(96, bswap32(x4))
-                )
+                // Swap adjacent bytes, then halfwords, simultaneously in every 32-bit lane.
+                let evenBytes := 0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff
+                let halfwords := 0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff
+                let swapped := or(shl(8, and(x, evenBytes)), and(shr(8, x), evenBytes))
+                encoded := or(shl(16, and(swapped, halfwords)), and(shr(16, swapped), halfwords))
             }
 
-            let mask := 0xffffffff
             let dst := add(add(buffer, 0x20), oldLen)
-            mstore(dst, validateAndEncode(first, mask))
-            mstore(add(dst, 20), validateAndEncode(second, mask))
+            mstore(dst, validateAndEncode(first))
+            mstore(add(dst, 20), validateAndEncode(second))
         }
 
         self.inputLen = newLen;

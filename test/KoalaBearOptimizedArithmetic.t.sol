@@ -53,7 +53,7 @@ contract KoalaBearOptimizedArithmeticHarness {
         assembly ("memory-safe") {
             packedWeightsPtr := weights
         }
-        return U._dotBaseRadix80(U._prepareBaseRadix80(packedWeightsPtr), w0, w1);
+        return U._dotBaseRadix64(U._prepareBaseRadix64(packedWeightsPtr), w0, w1);
     }
 
     function finalValue(bytes calldata blob, uint256 offset, uint256[] memory point)
@@ -70,6 +70,15 @@ contract KoalaBearOptimizedArithmeticHarness {
         returns (uint256)
     {
         return U._hornerRadix64(U._prepareHornerRadix64(blob, offset), x);
+    }
+
+    function horner64Memory(bytes calldata blob, uint256 offset, uint256 x)
+        external
+        pure
+        returns (uint256)
+    {
+        bytes memory polynomial = blob[offset:offset + 1280];
+        return U._hornerRadix64(U._prepareHornerRadix64Memory(polynomial), x);
     }
 }
 
@@ -144,15 +153,55 @@ contract KoalaBearOptimizedArithmeticTest is Test {
         assertEq(harness.finalValue(blob, 3, point), 0);
     }
 
+    function testFuzzConstantColumnsHorner(bytes32 seed) external view {
+        bytes memory blob = hex"123456";
+        uint256[64] memory coefficients;
+        uint256 common = _element(seed, 100) & ((uint256(1) << 224) - (uint256(1) << 96));
+        for (uint256 i; i < 64; ++i) {
+            coefficients[i] = common | ((_element(seed, i) >> 224) << 224);
+            blob = bytes.concat(blob, bytes20(bytes32(coefficients[i])));
+        }
+        uint256 x = uint256(seed) % M;
+        assertEq(harness.horner64(blob, 3, x), _referenceHorner(coefficients, x));
+        assertEq(harness.horner64Memory(blob, 3, x), _referenceHorner(coefficients, x));
+        assertEq(harness.horner64(blob, 3, 0), _referenceHorner(coefficients, 0));
+        assertEq(harness.horner64(blob, 3, 1), _referenceHorner(coefficients, 1));
+        assertEq(harness.horner64(blob, 3, M - 1), _referenceHorner(coefficients, M - 1));
+    }
+
+    function testFuzzHornerLateCommonColumnMismatch(bytes32 seed) external view {
+        bytes memory blob = hex"123456";
+        uint256[64] memory coefficients;
+        uint256 mask = (uint256(1) << 224) - (uint256(1) << 96);
+        uint256 common = _element(seed, 100) & mask;
+        for (uint256 i; i < 64; ++i) {
+            coefficients[i] = common | ((_element(seed, i) >> 224) << 224);
+        }
+        uint256 position = 2 + uint256(seed) % 62;
+        uint256 c = 1 + (uint256(seed) >> 16) % 4;
+        uint256 shift = 224 - 32 * c;
+        uint256 changed = (((coefficients[position] >> shift) & 0xffffffff) + 1) % M;
+        coefficients[position] =
+            (coefficients[position] & ~(uint256(0xffffffff) << shift)) | (changed << shift);
+        for (uint256 i; i < 64; ++i) {
+            blob = bytes.concat(blob, bytes20(bytes32(coefficients[i])));
+        }
+        uint256 x = uint256(seed) % M;
+        assertEq(harness.horner64(blob, 3, x), _referenceHorner(coefficients, x));
+        assertEq(harness.horner64Memory(blob, 3, x), _referenceHorner(coefficients, x));
+    }
+
     function testFuzzHornerRadix64(bytes32 seed) external view {
         (bytes memory blob, uint256[64] memory coefficients, uint256 x) = _hornerInputs(seed, false);
         assertEq(harness.horner64(blob, 3, x), _referenceHorner(coefficients, x));
+        assertEq(harness.horner64Memory(blob, 3, x), _referenceHorner(coefficients, x));
     }
 
     function testHornerRadix64MaximumAndZero() external view {
         (bytes memory blob, uint256[64] memory coefficients, uint256 x) =
             _hornerInputs(bytes32(0), true);
         assertEq(harness.horner64(blob, 3, x), _referenceHorner(coefficients, x));
+        assertEq(harness.horner64Memory(blob, 3, x), _referenceHorner(coefficients, x));
 
         blob = new bytes(1283);
         assertEq(harness.horner64(blob, 3, x), 0);

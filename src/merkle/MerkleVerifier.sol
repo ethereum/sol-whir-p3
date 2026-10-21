@@ -1343,6 +1343,389 @@ library MerkleVerifier {
         }
     }
 
+    // Shared breadth-first traversal for fixed-size packed frontiers.
+    function _computeRootFromPackedFrontier20BlobInPlaceBfs(
+        uint256[] memory frontierEntries,
+        uint256 frontierLen,
+        uint256 depth,
+        bytes calldata blob,
+        uint256 decommOffset,
+        uint256 decommLen
+    ) private pure returns (bytes32 root) {
+        assembly ("memory-safe") {
+            let digestMask := not(sub(shl(96, 1), 1))
+            let indexMask := sub(shl(96, 1), 1)
+            let entrySize := 0x20
+            let frontier := add(frontierEntries, 0x20)
+            // Use bytes [0, 65) for the exact 0x01 || left32 || right32 preimage.
+            // Solidity's advanced scratch-space rule permits this below 0x80:
+            // restore the free pointer before block exit and preserve the zero slot.
+            let savedFreePointer := mload(0x40)
+            let scratch := 0
+            mstore8(scratch, 0x01)
+            mstore(0x15, 0)
+            mstore(0x35, 0)
+
+            let decommBase := add(blob.offset, decommOffset)
+            let decommPtr := decommBase
+            let decommEnd := add(decommBase, mul(decommLen, 20))
+
+            let frontierEnd := add(frontier, shl(5, frontierLen))
+            for {
+                let level := 0
+            } lt(level, depth) {
+                level := add(level, 1)
+            } {
+                let ep := frontier
+                let nextPtr := frontier
+                for { } lt(ep, frontierEnd) { } {
+                    let packed := mload(ep)
+                    let nodeIsRight := and(packed, 1)
+                    let nextReadPtr := add(ep, entrySize)
+
+                    switch nodeIsRight
+                    case 0 {
+                        // The speculative word may be just beyond the array, within
+                        // allocated or temporary memory. Its index is used only if in bounds.
+                        let nextPacked := mload(nextReadPtr)
+                        switch and(
+                            lt(nextReadPtr, frontierEnd),
+                            eq(and(xor(nextPacked, packed), indexMask), 1)
+                        )
+                        case 1 {
+                            mcopy(1, ep, 20)
+                            mcopy(0x21, nextReadPtr, 20)
+                            nextReadPtr := add(nextReadPtr, entrySize)
+                        }
+                        default {
+                            mcopy(1, ep, 20)
+                            calldatacopy(0x21, decommPtr, 20)
+                            decommPtr := add(decommPtr, 20)
+                        }
+                    }
+                    default {
+                        calldatacopy(1, decommPtr, 20)
+                        decommPtr := add(decommPtr, 20)
+                        mcopy(0x21, ep, 20)
+                    }
+
+                    ep := nextReadPtr
+                    let parentIndex := shr(1, and(packed, indexMask))
+                    // Strict input ordering makes emitted parents strictly increasing.
+                    // Each output consumes at least one input, so in-place writes never
+                    // overwrite an unread entry.
+                    mstore(nextPtr, or(and(keccak256(scratch, 65), digestMask), parentIndex))
+                    nextPtr := add(nextPtr, entrySize)
+                }
+
+                frontierEnd := nextPtr
+            }
+
+            // Traversal and proof consumption depend only on indices, never digest bytes.
+            // Defer bounds rejection until here; missing proof data cannot change how
+            // many siblings are consumed or permit a root to escape validation.
+            if gt(decommPtr, decommEnd) {
+                mstore(0x00, 0x90196ee300000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, add(decommLen, 1))
+                mstore(0x24, decommLen)
+                revert(0x00, 0x44)
+            }
+            if iszero(eq(decommPtr, decommEnd)) {
+                mstore(0x00, 0xb48ec3d200000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, div(sub(decommPtr, decommBase), 20))
+                mstore(0x24, decommLen)
+                revert(0x00, 0x44)
+            }
+
+            frontierLen := shr(5, sub(frontierEnd, frontier))
+            let finalPacked := 0
+            if gt(frontierLen, 0) {
+                finalPacked := mload(frontier)
+            }
+            if or(iszero(eq(frontierLen, 1)), iszero(iszero(and(finalPacked, indexMask)))) {
+                let idx := sub(0, 1)
+                if gt(frontierLen, 0) {
+                    idx := and(finalPacked, indexMask)
+                }
+                mstore(0x00, 0x1d72965600000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, frontierLen)
+                mstore(0x24, idx)
+                revert(0x00, 0x44)
+            }
+
+            root := and(finalPacked, digestMask)
+            mstore(0x40, savedFreePointer)
+        }
+    }
+
+    /// @dev Version 0x0101 changes only the serialization order of sibling digests
+    /// to depth-first leaf order. All node hashes and transcript bytes are unchanged.
+    /// Adjacent sorted indices determine where each chain stops. Pending subtree
+    /// heights strictly decrease on the stack. Version 0x0001 uses breadth-first sibling order.
+    /// Stop heights occupy an allocated table across the assembly blocks. Its header
+    /// preserves the second block's free pointer while temporary stack entries use
+    /// memory from that pointer, with every read preceded by a write.
+    function _computeRootFromPackedFrontier20BlobTransport(
+        uint256[] memory frontierEntries,
+        uint256 frontierLen,
+        uint256 depth,
+        bytes calldata blob,
+        uint256 decommOffset,
+        uint256 decommLen
+    ) private pure returns (bytes32 root) {
+        uint256 transportVersion;
+        assembly ("memory-safe") {
+            transportVersion := shr(240, calldataload(add(blob.offset, 4)))
+        }
+        if (transportVersion != 0x0101) {
+            return _computeRootFromPackedFrontier20BlobInPlaceBfs(
+                frontierEntries, frontierLen, depth, blob, decommOffset, decommLen
+            );
+        }
+        uint256 stopHeights;
+        bool fallbackRequired;
+        assembly ("memory-safe") {
+            function highestBit(x) -> r {
+                // x is the xor of two 96-bit indices. Successive shifts leave
+                // at most five bits, then BYTE supplies floor(log2(x)); zero maps to zero.
+                if gt(x, 0xffffffffffffffffffff) {
+                    r := 80
+                    x := shr(80, x)
+                }
+                if gt(x, 0xffffffffff) {
+                    r := add(r, 40)
+                    x := shr(40, x)
+                }
+                if gt(x, 0xfffff) {
+                    r := add(r, 20)
+                    x := shr(20, x)
+                }
+                if gt(x, 0x3ff) {
+                    r := add(r, 10)
+                    x := shr(10, x)
+                }
+                if gt(x, 0x1f) {
+                    r := add(r, 5)
+                    x := shr(5, x)
+                }
+                r := add(
+                    r,
+                    byte(x, 0x0000010102020202030303030303030304040404040404040404040404040404)
+                )
+            }
+            // Reserve the table so its values survive intervening Solidity code.
+            // Fallback leaves the allocation intact and uses breadth-first traversal.
+            stopHeights := add(mload(0x40), 32)
+            mstore(0x40, add(stopHeights, shl(5, frontierLen)))
+            let stops := stopHeights
+            let mask := sub(shl(96, 1), 1)
+            fallbackRequired := or(iszero(frontierLen), gt(depth, 96))
+            let previous := 0
+            for { let i := 0 } lt(i, frontierLen) { i := add(i, 1) } {
+                let node := and(mload(add(add(frontierEntries, 32), shl(5, i))), mask)
+                fallbackRequired := or(fallbackRequired, shr(depth, node))
+                if i {
+                    fallbackRequired := or(fallbackRequired, iszero(gt(node, previous)))
+                    mstore(add(stops, shl(5, sub(i, 1))), highestBit(xor(previous, node)))
+                }
+                previous := node
+            }
+        }
+        if (fallbackRequired) {
+            return _computeRootFromPackedFrontier20BlobInPlaceBfs(
+                frontierEntries, frontierLen, depth, blob, decommOffset, decommLen
+            );
+        }
+        assembly ("memory-safe") {
+            let indexMask := sub(shl(96, 1), 1)
+            let digestMask := not(indexMask)
+            let stops := stopHeights
+            let frontier := add(frontierEntries, 32)
+            mstore(add(stops, shl(5, sub(frontierLen, 1))), depth)
+            let proofBase := add(blob.offset, decommOffset)
+            let proofPtr := proofBase
+            let proofEnd := add(proofBase, mul(decommLen, 20))
+            let stackTop := mload(0x40)
+            mstore(sub(stopHeights, 32), stackTop)
+            // The hash preimage uses Solidity's advanced scratch space below 0x80.
+            // Restore the free pointer on success; the zero slot stays untouched.
+            mstore8(0, 1)
+            mstore(0x15, 0)
+            mstore(0x35, 0)
+            mstore(stackTop, 255)
+            stackTop := add(stackTop, 32)
+            let pendingLevel := 255
+            for { let i := 0 } lt(i, frontierLen) { i := add(i, 1) } {
+                let packed := mload(add(frontier, shl(5, i)))
+                let node := and(packed, indexMask)
+                let current := and(packed, digestMask)
+                let stopLevel := mload(add(stops, shl(5, i)))
+                for { let h := 0 } lt(h, stopLevel) { } {
+                    let chainEnd := stopLevel
+                    if lt(pendingLevel, chainEnd) { chainEnd := pendingLevel }
+                    for { } lt(add(h, 7), chainEnd) { h := add(h, 8) } {
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                    }
+                    // The eight-step loop leaves at most seven proof nodes.
+                    if lt(add(h, 3), chainEnd) {
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        h := add(h, 4)
+                    }
+                    if lt(add(h, 1), chainEnd) {
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        h := add(h, 2)
+                    }
+                    if lt(h, chainEnd) {
+                        {
+                            let slot := add(1, shl(5, and(node, 1)))
+                            mstore(slot, current)
+                            calldatacopy(xor(slot, 32), proofPtr, 20)
+                        }
+                        proofPtr := add(proofPtr, 20)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        h := add(h, 1)
+                    }
+                    if lt(h, stopLevel) {
+                        stackTop := sub(stackTop, 32)
+                        mstore(1, and(mload(stackTop), digestMask))
+                        mstore(0x21, current)
+                        current := and(keccak256(0, 65), digestMask)
+                        node := shr(1, node)
+                        h := add(h, 1)
+                        pendingLevel := and(mload(sub(stackTop, 32)), 255)
+                    }
+                }
+                mstore(stackTop, or(current, stopLevel))
+                stackTop := add(stackTop, 32)
+                pendingLevel := stopLevel
+                root := current
+            }
+            if gt(proofPtr, proofEnd) {
+                mstore(0x00, 0x90196ee300000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, add(decommLen, 1))
+                mstore(0x24, decommLen)
+                revert(0x00, 0x44)
+            }
+            if lt(proofPtr, proofEnd) {
+                mstore(0x00, 0xb48ec3d200000000000000000000000000000000000000000000000000000000)
+                mstore(0x04, div(sub(proofPtr, proofBase), 20))
+                mstore(0x24, decommLen)
+                revert(0x00, 0x44)
+            }
+            mstore(0x40, mload(sub(stopHeights, 32)))
+        }
+    }
+
     function computeRootFromFrontier20Blob(
         bytes memory frontierBytes,
         uint256 frontierLen,
@@ -1365,6 +1748,32 @@ library MerkleVerifier {
         uint256 decommLen
     ) internal pure returns (bytes32 root) {
         return _computeRootFromPackedFrontier20Blob(
+            frontierEntries, frontierLen, depth, blob, decommOffset, decommLen
+        );
+    }
+
+    function computeRootFromPackedFrontier20BlobInPlace(
+        uint256[] memory frontierEntries,
+        uint256 frontierLen,
+        uint256 depth,
+        bytes calldata blob,
+        uint256 decommOffset,
+        uint256 decommLen
+    ) internal pure returns (bytes32 root) {
+        return _computeRootFromPackedFrontier20BlobInPlaceBfs(
+            frontierEntries, frontierLen, depth, blob, decommOffset, decommLen
+        );
+    }
+
+    function computeRootFromPackedFrontier20BlobTransport(
+        uint256[] memory frontierEntries,
+        uint256 frontierLen,
+        uint256 depth,
+        bytes calldata blob,
+        uint256 decommOffset,
+        uint256 decommLen
+    ) internal pure returns (bytes32 root) {
+        return _computeRootFromPackedFrontier20BlobTransport(
             frontierEntries, frontierLen, depth, blob, decommOffset, decommLen
         );
     }
